@@ -657,6 +657,12 @@ module.exports = function registerRoutes(router, context) {
       allPeople.push({ uid, name: person.name || uid, title: person.title || '' });
     }
 
+    // Enrich teams with org display names
+    const orgDisplayNames = getOrgDisplayNames();
+    for (const team of purview.teams) {
+      team.orgDisplayName = orgDisplayNames[team.orgKey] || team.orgKey;
+    }
+
     const response = {
       manager: managerPerson ? {
         uid: req.userUid,

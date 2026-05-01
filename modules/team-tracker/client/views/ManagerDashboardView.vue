@@ -373,7 +373,7 @@
                       @click="navigateToTeamDetail(team)"
                       class="text-primary-600 dark:text-primary-400 hover:underline font-medium"
                     >{{ team.name }}</button>
-                    <span class="ml-1.5 text-xs text-gray-400 dark:text-gray-500">{{ team.orgKey }}</span>
+                    <span class="ml-1.5 text-xs text-gray-400 dark:text-gray-500">{{ team.orgDisplayName || team.orgKey }}</span>
                   </td>
                   <!-- Team field cells -->
                   <td
