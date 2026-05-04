@@ -539,23 +539,8 @@
                       >
                     </div>
 
-                    <!-- SINGLE-CELL EDIT MODE -->
-                    <div v-else-if="editingTeamCell.teamId === team.id && editingTeamCell.fieldId === '__boards__'" class="editing-cell relative min-w-[160px]">
-                      <input
-                        v-model="editTeamFieldValue"
-                        class="w-full rounded border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 text-sm"
-                        placeholder="url1, url2"
-                        @keyup.enter="saveTeamBoardsCell(team.id)"
-                        @keyup.escape="cancelTeamFieldEdit"
-                      >
-                      <div class="flex gap-1.5 mt-1">
-                        <button class="px-2 py-0.5 text-xs font-medium text-white bg-primary-600 rounded hover:bg-primary-700 disabled:opacity-50" :disabled="saving" @click="saveTeamBoardsCell(team.id)">Save</button>
-                        <button class="px-2 py-0.5 text-xs font-medium text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 rounded hover:bg-gray-200 dark:hover:bg-gray-600" @click="cancelTeamFieldEdit">Cancel</button>
-                      </div>
-                    </div>
-
-                    <!-- DISPLAY MODE -->
-                    <div v-else class="group flex items-center gap-1.5 cursor-pointer" @click="startBoardsEdit(team)">
+                    <!-- DISPLAY MODE (click opens drawer) -->
+                    <div v-else class="group flex items-center gap-1.5 cursor-pointer" @click="boardsDrawerTeam = team">
                       <div v-if="team.boards && team.boards.length > 0" class="flex flex-wrap gap-1.5">
                         <a
                           v-for="(board, idx) in team.boards"
@@ -583,6 +568,14 @@
         </div>
       </div>
     </template>
+
+    <!-- Boards edit drawer -->
+    <TeamBoardsDrawer
+      :team="boardsDrawerTeam"
+      :is-open="!!boardsDrawerTeam"
+      @close="boardsDrawerTeam = null"
+      @saved="refresh()"
+    />
   </div>
 </template>
 
@@ -596,6 +589,7 @@ import { useRoster } from '@shared/client/composables/useRoster'
 import { apiRequest } from '@shared/client/services/api'
 import ConstrainedAutocomplete from '../components/ConstrainedAutocomplete.vue'
 import PersonAutocomplete from '../components/PersonAutocomplete.vue'
+import TeamBoardsDrawer from '../components/TeamBoardsDrawer.vue'
 
 const nav = inject('moduleNav', null)
 
@@ -631,6 +625,9 @@ const bulkTeamChanges = reactive({})
 // Team tab: single-cell editing state
 const editingTeamCell = ref({ teamId: null, fieldId: null })
 const editTeamFieldValue = ref(null)
+
+// Team tab: boards drawer state
+const boardsDrawerTeam = ref(null)
 
 // Team tab: bulk editing state
 const teamBulkEditing = ref(false)
@@ -1054,28 +1051,6 @@ async function saveTeamFieldCell(teamId, fieldId) {
       valueToSave = valueToSave || null
     }
     await updateTeamFields(teamId, { [fieldId]: valueToSave })
-    editingTeamCell.value = { teamId: null, fieldId: null }
-    refresh()
-  } finally {
-    saving.value = false
-  }
-}
-
-function startBoardsEdit(team) {
-  editTeamFieldValue.value = (team.boards || []).map(b => b.url).join(', ')
-  editingTeamCell.value = { teamId: team.id, fieldId: '__boards__' }
-}
-
-async function saveTeamBoardsCell(teamId) {
-  saving.value = true
-  try {
-    const urls = editTeamFieldValue.value.split(',').map(s => s.trim()).filter(Boolean)
-    const boards = urls.map(url => ({ url }))
-    await apiRequest(`/modules/team-tracker/structure/teams/${teamId}/boards`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ boards })
-    })
     editingTeamCell.value = { teamId: null, fieldId: null }
     refresh()
   } finally {
