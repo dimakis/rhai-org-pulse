@@ -100,7 +100,7 @@
             <input
               v-model="searchQuery"
               type="text"
-              placeholder="Search by name, title, or team..."
+              placeholder="Search by name, title, team, or field values..."
               class="w-full pl-9 pr-8 py-2 text-sm rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
             >
             <button
@@ -681,6 +681,19 @@ const filteredReports = computed(() => {
       if (r.name?.toLowerCase().includes(q)) return true
       if (r.title?.toLowerCase().includes(q)) return true
       if (r.teamIds?.some(id => teamById.value[id]?.name?.toLowerCase().includes(q))) return true
+      // Search custom field values
+      for (const field of visiblePersonFields.value) {
+        const val = r.customFields?.[field.id]
+        if (!val) continue
+        if (typeof val === 'string' && val.toLowerCase().includes(q)) return true
+        if (Array.isArray(val) && val.some(v => {
+          if (typeof v === 'string') {
+            const resolved = referencedPeople.value[v]
+            return (resolved || v).toLowerCase().includes(q)
+          }
+          return false
+        })) return true
+      }
       return false
     })
   }
