@@ -146,7 +146,7 @@ function handleRetry() {
 
         <!-- Architect -->
         <div>
-          <label for="rock-architect" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Architect</label>
+          <label for="rock-architect" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Engineering Lead</label>
           <input
             id="rock-architect"
             v-model="formData.architect"
