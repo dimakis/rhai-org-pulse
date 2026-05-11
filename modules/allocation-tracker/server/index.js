@@ -348,6 +348,8 @@ module.exports = function registerRoutes(router, context) {
         return res.status(400).json({ error: 'limit must be between 1 and 1000' });
       }
 
+      const config = moduleRead('config/classification.json') || DEFAULT_CONFIG;
+
       console.log(`[allocation-tracker] Bulk classify: ${parsedLimit} issues, dryRun=${dryRun}`);
       console.log(`[allocation-tracker] JQL: ${jql}`);
 
@@ -370,7 +372,7 @@ module.exports = function registerRoutes(router, context) {
       for (const jiraIssue of response.issues) {
         try {
           const issue = transformJiraIssue(jiraIssue);
-          const result = await classifyAndWrite(issue, { dryRun });
+          const result = await classifyAndWrite(issue, { dryRun, config });
 
           results.processed++;
 

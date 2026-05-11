@@ -330,17 +330,18 @@
           </div>
 
           <!-- Bulk Result -->
-          <div v-if="bulkResult" class="mt-4 p-3 rounded-md border bg-blue-50 border-blue-200">
+          <div v-if="bulkResult" class="mt-4 p-3 rounded-md border" :class="bulkResult.error ? 'bg-red-50 border-red-200' : 'bg-blue-50 border-blue-200'">
             <div class="text-sm">
-              <p class="font-medium text-blue-900">
-                {{ bulkResult.dryRun ? '📋 Preview Results' : '✅ Bulk Classification Complete' }}
+              <p class="font-medium" :class="bulkResult.error ? 'text-red-900' : 'text-blue-900'">
+                {{ bulkResult.error ? '❌ Bulk Classification Failed' : bulkResult.dryRun ? '📋 Preview Results' : '✅ Bulk Classification Complete' }}
               </p>
-              <div class="mt-2 space-y-1 text-xs text-blue-800">
+              <p v-if="bulkResult.error" class="mt-1 text-xs text-red-800">{{ bulkResult.error }}</p>
+              <div class="mt-2 space-y-1 text-xs" :class="bulkResult.error ? 'text-red-800' : 'text-blue-800'">
                 <div><span class="font-semibold">Total matched:</span> {{ bulkResult.total }}</div>
                 <div><span class="font-semibold">Fetched:</span> {{ bulkResult.fetched }}</div>
                 <div><span class="font-semibold">Classified:</span> {{ bulkResult.classified }}</div>
                 <div><span class="font-semibold">Skipped:</span> {{ bulkResult.skipped }}</div>
-                <div v-if="bulkResult.errors.length > 0" class="text-red-700">
+                <div v-if="bulkResult.errors?.length > 0" class="text-red-700">
                   <span class="font-semibold">Errors:</span> {{ bulkResult.errors.length }}
                 </div>
               </div>
