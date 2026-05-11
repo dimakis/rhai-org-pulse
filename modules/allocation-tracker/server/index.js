@@ -331,7 +331,7 @@ module.exports = function registerRoutes(router, context) {
   });
 
   /**
-   * Bulk classify issues matching a JQL query
+   * Bulk classify issues via GitLab CI pipeline
    * POST /api/modules/allocation-tracker/classify/bulk
    * Body: { jql: 'project = AIPCC AND ...', dryRun?: boolean, limit?: number }
    */
@@ -348,71 +348,63 @@ module.exports = function registerRoutes(router, context) {
         return res.status(400).json({ error: 'limit must be between 1 and 1000' });
       }
 
-      const config = moduleRead('config/classification.json') || DEFAULT_CONFIG;
+      // Get GitLab pipeline trigger config from environment
+      const gitlabToken = process.env.GITLAB_CLASSIFIER_TRIGGER_TOKEN;
+      const gitlabProjectId = process.env.GITLAB_CLASSIFIER_PROJECT_ID;
 
-      console.log(`[allocation-tracker] Bulk classify: ${parsedLimit} issues, dryRun=${dryRun}`);
-      console.log(`[allocation-tracker] JQL: ${jql}`);
-
-      // Fetch issues from Jira matching JQL
-      const response = await jiraRequest(
-        `/rest/api/3/search?jql=${encodeURIComponent(jql)}&maxResults=${parsedLimit}&fields=summary,description,issuetype,customfield_10464,project`
-      );
-
-      const results = {
-        total: response.total,
-        fetched: response.issues.length,
-        processed: 0,
-        classified: 0,
-        skipped: 0,
-        errors: [],
-        details: []
-      };
-
-      // Process each issue
-      for (const jiraIssue of response.issues) {
-        try {
-          const issue = transformJiraIssue(jiraIssue);
-          const result = await classifyAndWrite(issue, { dryRun, config });
-
-          results.processed++;
-
-          const wasClassified = result.classified || result.written;
-          const detail = {
-            issueKey: issue.key,
-            status: wasClassified ? 'classified' : 'skipped',
-            reason: result.reason || result.classification?.method,
-            category: result.classification?.category,
-            confidence: result.classification?.confidence
-          };
-
-          if (wasClassified) {
-            results.classified++;
-            console.log(`  ✅ ${issue.key}: ${result.classification.category} (${result.classification.confidence})`);
-          } else {
-            results.skipped++;
-            console.log(`  ⏭️  ${issue.key}: ${result.reason || 'skipped'}`);
-          }
-
-          results.details.push(detail);
-
-          // Add delay between Jira writes to avoid rate limiting
-          if (!dryRun && results.processed < response.issues.length) {
-            await new Promise(resolve => setTimeout(resolve, 200));
-          }
-        } catch (error) {
-          results.errors.push({
-            issueKey: jiraIssue.key,
-            error: error.message
-          });
-          console.error(`  ❌ ${jiraIssue.key}: ${error.message}`);
-        }
+      if (!gitlabToken || !gitlabProjectId) {
+        return res.status(500).json({
+          error: 'GitLab pipeline not configured. Missing GITLAB_CLASSIFIER_TRIGGER_TOKEN or GITLAB_CLASSIFIER_PROJECT_ID environment variables.'
+        });
       }
 
-      console.log(`[allocation-tracker] Bulk classify complete: ${results.classified} classified, ${results.skipped} skipped, ${results.errors.length} errors`);
+      console.log(`[allocation-tracker] Triggering GitLab pipeline for bulk classification`);
+      console.log(`  JQL: ${jql}`);
+      console.log(`  Dry Run: ${dryRun}`);
+      console.log(`  Limit: ${parsedLimit}`);
 
-      res.json(results);
+      // Trigger GitLab CI pipeline
+      const response = await fetch(
+        `https://gitlab.com/api/v4/projects/${gitlabProjectId}/trigger/pipeline`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            token: gitlabToken,
+            ref: 'main',
+            variables: {
+              JQL: jql,
+              DRY_RUN: String(dryRun),
+              LIMIT: String(parsedLimit),
+              ORG_PULSE_URL: process.env.ORG_PULSE_URL || ''
+            }
+          })
+        }
+      );
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('[allocation-tracker] GitLab pipeline trigger failed:', errorText);
+        return res.status(502).json({
+          error: 'Failed to trigger GitLab pipeline',
+          details: errorText
+        });
+      }
+
+      const pipeline = await response.json();
+
+      console.log(`[allocation-tracker] Pipeline triggered: ${pipeline.web_url}`);
+
+      res.json({
+        status: 'triggered',
+        pipelineId: pipeline.id,
+        pipelineUrl: pipeline.web_url,
+        message: 'Classification pipeline started in GitLab. View progress at the pipeline URL.'
+      });
     } catch (error) {
-      console.error('[allocation-tracker] Bulk classification error:', error);
+      console.error('[allocation-tracker] Bulk classification trigger error:', error);
       res.status(500).json({ error: 'Internal server error' });
     }
   });

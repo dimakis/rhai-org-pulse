@@ -329,38 +329,39 @@
             </div>
           </div>
 
-          <!-- Bulk Result -->
-          <div v-if="bulkResult" class="mt-4 p-3 rounded-md border" :class="bulkResult.error ? 'bg-red-50 border-red-200' : 'bg-blue-50 border-blue-200'">
-            <div class="text-sm">
-              <p class="font-medium" :class="bulkResult.error ? 'text-red-900' : 'text-blue-900'">
-                {{ bulkResult.error ? '❌ Bulk Classification Failed' : bulkResult.dryRun ? '📋 Preview Results' : '✅ Bulk Classification Complete' }}
+          <!-- Bulk Result - Pipeline Triggered -->
+          <div v-if="bulkResult" class="mt-4 p-3 rounded-md border bg-blue-50 border-blue-200">
+            <div v-if="bulkResult.error" class="text-sm">
+              <p class="font-medium text-red-900">❌ Error</p>
+              <p class="mt-1 text-xs text-red-800">{{ bulkResult.error }}</p>
+              <p v-if="bulkResult.details" class="mt-1 text-xs text-red-700">{{ bulkResult.details }}</p>
+            </div>
+            <div v-else class="text-sm">
+              <p class="font-medium text-blue-900">
+                🚀 Classification Pipeline Triggered
               </p>
-              <p v-if="bulkResult.error" class="mt-1 text-xs text-red-800">{{ bulkResult.error }}</p>
-              <div class="mt-2 space-y-1 text-xs" :class="bulkResult.error ? 'text-red-800' : 'text-blue-800'">
-                <div><span class="font-semibold">Total matched:</span> {{ bulkResult.total }}</div>
-                <div><span class="font-semibold">Fetched:</span> {{ bulkResult.fetched }}</div>
-                <div><span class="font-semibold">Classified:</span> {{ bulkResult.classified }}</div>
-                <div><span class="font-semibold">Skipped:</span> {{ bulkResult.skipped }}</div>
-                <div v-if="bulkResult.errors?.length > 0" class="text-red-700">
-                  <span class="font-semibold">Errors:</span> {{ bulkResult.errors.length }}
-                </div>
-              </div>
-
-              <!-- Show first few classified issues -->
-              <div v-if="bulkResult.details?.length > 0" class="mt-3 max-h-48 overflow-y-auto">
-                <p class="font-semibold text-blue-900 mb-1">Sample Results:</p>
-                <div class="space-y-1">
-                  <div v-for="detail in bulkResult.details.slice(0, 10)" :key="detail.issueKey" class="text-xs">
-                    <span class="font-mono">{{ detail.issueKey }}:</span>
-                    <span v-if="detail.status === 'classified'" class="text-green-700">
-                      {{ detail.category }} ({{ (detail.confidence * 100).toFixed(0) }}%)
-                    </span>
-                    <span v-else class="text-gray-600">{{ detail.reason }}</span>
-                  </div>
-                  <p v-if="bulkResult.details.length > 10" class="text-xs italic text-blue-700 mt-2">
-                    ... and {{ bulkResult.details.length - 10 }} more
-                  </p>
-                </div>
+              <p class="mt-2 text-xs text-blue-800">
+                Bulk classification is running in GitLab CI. View real-time progress and logs:
+              </p>
+              <a
+                :href="bulkResult.pipelineUrl"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="inline-flex items-center gap-1 mt-3 px-3 py-2 text-sm bg-primary-600 text-white rounded-md font-medium hover:bg-primary-700 transition-colors"
+              >
+                <span>→ Open Pipeline #{{ bulkResult.pipelineId }} in GitLab</span>
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                </svg>
+              </a>
+              <div class="mt-3 space-y-1 text-xs text-blue-700">
+                <p><span class="font-semibold">Status:</span> {{ bulkResult.status }}</p>
+                <p class="italic">{{ bulkResult.message }}</p>
+                <p class="mt-2 pt-2 border-t border-blue-200">
+                  💡 Results will be written to Jira when the pipeline completes. Download the
+                  <code class="px-1 py-0.5 bg-blue-100 rounded">classification-results.json</code>
+                  artifact for detailed per-issue results.
+                </p>
               </div>
             </div>
           </div>
