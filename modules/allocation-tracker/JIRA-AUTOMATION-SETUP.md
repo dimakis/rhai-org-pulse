@@ -1,6 +1,24 @@
-# Jira Automation Rule Setup for Activity Type Classification
+# Jira Cloud Automation Rule Setup for Activity Type Classification
 
-This document describes how to set up a Jira automation rule that triggers real-time Activity Type classification when issues are created or updated.
+This document provides step-by-step instructions for setting up a Jira Cloud automation rule that triggers real-time Activity Type classification when issues are created or updated.
+
+**Platform:** Jira Cloud (redhat.atlassian.net)  
+**User Level:** Jira Administrator  
+**Time Required:** 15-20 minutes  
+**Complexity:** Moderate - requires configuration in two systems (Org Pulse + Jira)
+
+## Why This Is Complicated
+
+Setting up auto-classification requires configuring **two separate systems**:
+
+1. **Org Pulse** (backend service) - must know which Jira projects to classify
+2. **Jira Cloud** (automation rule) - must know when to call Org Pulse
+
+If these two configurations don't match (wrong project keys, different issue types, etc.), classification silently fails.
+
+**Common failure mode:** You create a Jira automation rule that fires correctly, but Org Pulse skips the issue because the project isn't configured in Org Pulse Settings. The Jira audit log shows "success" but nothing happens.
+
+This guide walks through both configurations step-by-step to ensure they match.
 
 ## Overview
 
@@ -18,31 +36,38 @@ The classification webhook integrates with Org Pulse's classification endpoint t
 
 ## Prerequisites
 
-1. **Org Pulse deployed** and accessible at production URL
-2. **Admin access** to Jira (redhat.atlassian.net)
-3. **Activity Type field** exists (customfield_10464)
-4. **Verified project keys** - confirm the Jira projects you want to classify actually exist
+Before you begin, you must have:
 
-## Important: Verify Your Project Keys First
+1. **Jira Administrator access** to redhat.atlassian.net
+2. **Org Pulse admin access** to configure classification settings
+3. **Activity Type field exists** in your Jira instance (customfield_10464)
+4. **Your project key** - Find it in Project Settings → Details, or in the URL when viewing issues (e.g., `AIPCC`, `RHELAI`)
 
-Before configuring automation, verify your Jira project keys are correct:
+⚠️ **CRITICAL:** You must know your exact Jira project key before proceeding. The project key is NOT the same as the project name.
 
-1. Go to Jira → Settings → Projects
-2. Find your target projects and note their **exact project keys**
-3. Common mistakes:
-   - `RHOAIENG` ❌ (doesn't exist) vs `RHOAIEDGE` ✅ (exists)
-   - `INFERENG` ❌ (doesn't exist) vs actual inference project key
-   - `RHAIENG` ❌ (doesn't exist) vs `RHELAI` ✅ (exists)
+## How to Find Your Jira Project Key
 
-**Test your project keys:**
+**Method 1: From the Issue URL**
+1. Open any issue in your project
+2. Look at the browser URL: `https://redhat.atlassian.net/browse/XXXXX-123`
+3. The letters before the dash are your project key (e.g., `AIPCC`, `RHELAI`)
+
+**Method 2: From Project Settings**
+1. Navigate to your project
+2. Click **Project settings** (gear icon in left sidebar)
+3. Click **Details** (first item in left sidebar)
+4. Look for "Key: XXXXX" near the top
+5. Write down this exact key - you'll need it multiple times
+
+**Method 3: Verify via API (optional, for validation)**
 ```bash
-# Verify project exists
+# Replace YOUR-PROJECT-KEY with the key you found above
 curl -s -u "${JIRA_EMAIL}:${JIRA_TOKEN}" \
   "https://redhat.atlassian.net/rest/api/3/project/YOUR-PROJECT-KEY" | \
   jq '.key, .name'
 ```
 
-If this returns `null`, your project key is wrong.
+If this returns `null`, the project key doesn't exist - double-check spelling and capitalization.
 
 ## Step 0: Configure Org Pulse (REQUIRED FIRST)
 
@@ -65,99 +90,246 @@ If this returns `null`, your project key is wrong.
 
 ⚠️ **If you skip this step**, the Jira automation will trigger but classification will silently fail because the backend isn't configured for those projects.
 
-## Automation Rule Configuration
+## Jira Cloud Automation Rule Configuration
 
-### Step 1: Create New Automation Rule
+### Step 1: Navigate to Automation
 
-1. Navigate to Jira Settings → System → Automation
-2. Click **Create rule**
-3. **Name:** Choose based on scope:
-   - Single project: `Auto-Classify Activity Type (RHELAI)`
-   - Multiple projects: `Auto-Classify Activity Type (Multi-Project)`
-   - All configured: `Auto-Classify Activity Type (AIPCC, RHELAI, RHOAIEDGE)`
-4. **Description:** `Automatically classify issues into 40/40/20 allocation buckets using Org Pulse classification service`
+1. In Jira Cloud, click the **gear icon** (⚙️) in the top-right corner
+2. From the dropdown menu, select **System**
+3. In the left sidebar under "APPS", click **Automation**
+4. You should see the "Automation rules" page with a list of existing rules (if any)
 
-### Step 2: Configure Trigger
+### Step 2: Create New Rule
 
-**Trigger Type:** Issue created OR Issue updated
-
-**Filter Configuration:**
-- **Project(s):** Select your target project(s)
-- **Issue Types:** Story, Bug, Spike, Task, Epic
-- **Conditions:** 
-  - Field value changed (Activity Type) OR Issue created
-  - Activity Type is EMPTY
-
-**JQL Filter (Advanced):**
-
-**For a single project:**
-```jql
-project = RHELAI AND 
-type in (Story, Bug, Spike, Task, Epic) AND 
-"Activity Type" is EMPTY
-```
-
-**For multiple projects:**
-```jql
-project in (AIPCC, RHELAI, RHOAIEDGE) AND 
-type in (Story, Bug, Spike, Task, Epic) AND 
-"Activity Type" is EMPTY
-```
-
-⚠️ **CRITICAL:** The project keys in this JQL filter must:
-1. Actually exist in Jira (verify with Step 0)
-2. Match the project keys configured in Org Pulse Settings (Step 0)
-
-### Step 3: Add Condition (Optional)
-
-To avoid classifying issues that already have Activity Type set:
-
-1. Add **Condition: Field Value**
-2. Field: Activity Type
-3. Condition: is empty
-
-### Step 4: Configure Action - Send Web Request
-
-**Action Type:** Send web request
-
-**Configuration:**
-- **Web request URL:** `https://<org-pulse-production-url>/api/modules/allocation-tracker/classify`
-  - **Production:** `https://team-tracker.apps.int.spoke.prod.us-west-2.aws.paas.redhat.com/api/modules/allocation-tracker/classify`
-- **HTTP method:** POST
-- **HTTP headers:**
-  - `Content-Type: application/json`
-  - **Optional:** `Authorization: Bearer <api-token>` (if auth enabled)
-- **Webhook body:** Custom data
-  
-**Request Body (JSON):**
-```json
-{
-  "issueKey": "{{issue.key}}",
-  "dryRun": false
-}
-```
-
-**Advanced Settings:**
-- **Timeout:** 10 seconds
-- **Retry on error:** No (classification can be manually triggered if needed)
-
-### Step 5: Add Logging (Optional)
-
-To track classification activity:
-
-1. Add **Action: Create a new issue comment**
-2. Comment body:
+1. Click the blue **Create rule** button (top-right)
+2. You'll see a page with trigger options - **ignore this for now**, we'll configure triggers in the next steps
+3. Look for the rule name field at the top of the page (it may say "New rule" or have an edit icon)
+4. Click the name field and enter: `Auto-Classify Activity Type (YOUR-PROJECT-KEY)`
+   - Replace YOUR-PROJECT-KEY with your actual project key (e.g., `Auto-Classify Activity Type (AIPCC)`)
+5. Click the description field (below the name) and enter:
    ```
-   🤖 Auto-classified via Org Pulse
+   Automatically classify issues into 40/40/20 allocation buckets using Org Pulse classification service
    ```
-3. **Restrict visibility:** Internal only
 
-### Step 6: Enable and Test
+### Step 3: Add First Trigger - Field Value Changed
 
-1. Click **Turn it on**
-2. Test by creating a new issue in one of your configured projects with keywords like "fix", "test", "spike"
-3. Verify Activity Type field is populated within 5-10 seconds
-4. Check the issue matches your configured projects and issue types
+1. Click **New trigger** (or "+ Add trigger" - usually a prominent button in the "WHEN" section)
+2. You'll see a modal/panel with trigger type options
+3. Scroll down and click **Field value changed**
+4. You should now see the field value changed configuration panel:
+
+   **Fields to monitor:**
+   - Click the dropdown
+   - Type "Activity Type" or scroll to find it
+   - Click **Activity Type** to select it
+
+   **Change type:**
+   - Click the dropdown under "Change type"
+   - Select **Any changes to the field value**
+
+5. Click **Save** or **Continue** (button at bottom of the panel)
+6. You should now see "Field value changed: Activity Type" in the WHEN section
+
+### Step 4: Add Second Trigger - Issue Created
+
+1. Look for the **New trigger** button again (it should appear below your first trigger or in the WHEN section toolbar)
+2. Click **New trigger**
+3. From the trigger type options, select **Issue created**
+4. No additional configuration needed - click **Save** or **Continue**
+5. You should now see TWO triggers in the WHEN section:
+   - Field value changed: Activity Type
+   - Issue created
+
+**Visual check:** The WHEN section should show both triggers with an implied "OR" relationship (the rule fires when either happens).
+
+### Step 5: Add Condition - JQL Filter
+
+Now we need to filter which issues get classified (only certain projects/issue types, and only when Activity Type is empty).
+
+1. Scroll down to find the **IF** section (conditions section)
+2. Click **Add condition** or **New condition**
+3. You'll see a modal/panel with condition type options
+4. Look for and click **Advanced compare condition** or **JQL condition** (the exact name varies)
+   - If you don't see "JQL condition", look for "Advanced" or "Compare values" and check if it has a JQL option
+5. In the JQL text box that appears, paste this JQL (replace YOUR-PROJECT-KEY):
+
+   **For a single project:**
+   ```jql
+   project = YOUR-PROJECT-KEY AND type in (Story, Bug, Spike, Task, Epic, Vulnerability, Weakness) AND "Activity Type" is EMPTY
+   ```
+
+   **For multiple projects (if needed):**
+   ```jql
+   project in (PROJECT-A, PROJECT-B, PROJECT-C) AND type in (Story, Bug, Spike, Task, Epic, Vulnerability, Weakness) AND "Activity Type" is EMPTY
+   ```
+
+6. Click **Save** or **Continue**
+7. You should see the JQL condition appear in the IF section
+
+⚠️ **CRITICAL:** 
+- Replace YOUR-PROJECT-KEY with your actual project key (e.g., `AIPCC`)
+- The project key(s) in this JQL MUST match what you configured in Org Pulse Settings (Step 0)
+- Test the JQL in Jira's issue search first if you want to verify it works
+
+### Step 6: Add Action - Send Web Request
+
+This is the action that actually calls Org Pulse to classify the issue.
+
+1. Scroll down to the **THEN** section (actions section)
+2. Click **Add action** or **New action**
+3. You'll see a modal/panel with action type options
+4. Look for and click **Send web request** (might be under "External" or "Integrations" category)
+5. Configure the web request form:
+
+   **Web request URL:**
+   ```
+   https://team-tracker.apps.int.spoke.prod.us-west-2.aws.paas.redhat.com/api/modules/allocation-tracker/classify
+   ```
+   
+   **HTTP method:**
+   - Click the dropdown and select **POST**
+
+   **HTTP headers:**
+   - Click **Add header** or the "+ Headers" button
+   - Header name: `Content-Type`
+   - Header value: `application/json`
+
+   **Webhook body:**
+   - Select **Custom data** from the dropdown (not "Issue data" or other options)
+
+   **Custom data (paste this exactly into the text box):**
+   ```json
+   {
+     "issueKey": "{{issue.key}}",
+     "dryRun": false
+   }
+   ```
+   
+   **Note:** The `{{issue.key}}` is a Jira smart value that will be replaced with the actual issue key (e.g., AIPCC-123) when the rule runs.
+
+   **Timeout (if shown):**
+   - Set to **10** seconds
+
+   **Retry on error (if shown):**
+   - Set to **No** or leave unchecked
+
+6. Click **Save** or **Continue**
+7. You should see "Send web request" in the THEN section
+
+### Step 7: Review and Enable
+
+1. Scroll to the top of the page - you should see a visual summary:
+   ```
+   WHEN:
+     - Field value changed: Activity Type
+     - Issue created
+   
+   IF:
+     - JQL condition: project = YOUR-KEY AND ...
+   
+   THEN:
+     - Send web request
+   ```
+
+2. Look for the **Turn it on** toggle or button (usually top-right)
+3. Click **Turn it on** to enable the rule
+4. You may see a confirmation dialog - click **Enable** or **Confirm**
+5. The rule should now show as "Enabled" or "Active"
+
+**If you can't find "Turn it on":** Look for a toggle switch near the rule name, or a "Publish" button, or check if there's a status dropdown.
+
+## Step 8: Test the Automation
+
+### Create a Test Issue
+
+1. Navigate to your Jira project
+2. Click **Create** (top navigation bar)
+3. Fill in the issue:
+   - **Project:** Your configured project
+   - **Issue Type:** Story or Bug (must be one of the types in your JQL filter)
+   - **Summary:** `Test classification - fix login bug`
+   - **Description:** Leave blank or add details
+   - **Activity Type:** **Leave empty** (critical - the rule only runs when this is empty)
+4. Click **Create**
+5. The issue page should open
+
+### Verify Classification
+
+1. **Wait 5-10 seconds** (the webhook call takes a few seconds)
+2. **Refresh the page** (F5 or Cmd+R)
+3. **Look at the Activity Type field** (usually in the right sidebar or details panel)
+4. **Expected result:** Activity Type should now show **"Tech Debt & Quality"**
+   - This happens because the summary contains "fix" and "bug" keywords
+
+### If Activity Type Stays Empty
+
+The rule didn't run or the classification failed. Follow these debugging steps:
+
+**Step A: Check the Automation Audit Log**
+
+1. Go to Jira Settings (⚙️) → System → **Automation**
+2. Find your "Auto-Classify Activity Type" rule in the list
+3. Click on the rule name to open it
+4. Look for an **Audit log** tab or link (usually top-right or in a submenu)
+5. Click **Audit log**
+6. Look for the most recent execution matching your test issue:
+   - **Success:** Shows green checkmark - the rule ran successfully
+   - **Failed:** Shows red X - click to see error details
+   - **Not listed:** The rule didn't run at all (trigger or condition didn't match)
+
+**Step B: Check Why the Rule Didn't Run**
+
+If your test issue doesn't appear in the audit log:
+
+1. **Verify the issue type:** Go back to your issue, check that Type = Story or Bug (must match your JQL filter)
+2. **Verify Activity Type was empty:** If you accidentally set it when creating the issue, the JQL condition fails
+3. **Verify the project key:** Check the issue key (e.g., AIPCC-123) matches what's in your JQL filter
+4. **Test your JQL directly:**
+   - In Jira, go to **Filters** → **Advanced issue search**
+   - Paste your exact JQL filter
+   - Replace `"Activity Type" is EMPTY` with `"Activity Type" is EMPTY OR "Activity Type" is not EMPTY`
+   - Click **Search**
+   - Your test issue should appear - if not, the JQL is wrong
+
+**Step C: Check if Org Pulse Received the Request**
+
+If the audit log shows success but Activity Type is still empty:
+
+1. Go to Org Pulse → **Settings** → **Allocation Tracker** → **Classification** tab
+2. Enter your test issue key (e.g., AIPCC-123)
+3. Click **Test (Dry Run)**
+4. **If it returns a classification:** The webhook integration works, but the rule might not have called it correctly
+5. **If it returns "skipped: project not configured":** Go back to Step 0 and verify your project key is in the "Jira Projects" field
+
+**Step D: Check the Web Request Action**
+
+1. Go back to your automation rule (Settings → System → Automation → your rule)
+2. Click to edit the rule
+3. Scroll to the "Send web request" action
+4. Verify:
+   - URL is exactly: `https://team-tracker.apps.int.spoke.prod.us-west-2.aws.paas.redhat.com/api/modules/allocation-tracker/classify`
+   - Method is POST
+   - Header `Content-Type: application/json` exists
+   - Custom data has `"issueKey": "{{issue.key}}"` (with the double curly braces)
+
+### Expected Behavior Summary
+
+**✅ High-confidence classifications (≥85%):**
+- Activity Type auto-populated within 5-10 seconds
+- Bug/Vulnerability issues → "Tech Debt & Quality"
+- Keywords "fix", "test", "refactor" → "Tech Debt & Quality"
+- Keywords "spike", "POC", "research" → "Learning & Enablement"
+- Keywords "RFE", "enhancement", "feature" → "New Features"
+
+**⚠️ Low-confidence classifications (<85%):**
+- Activity Type stays empty (not confident enough to auto-classify)
+- Can be classified manually via Org Pulse UI
+
+**🚫 Already classified:**
+- Automation skips issues that already have Activity Type set
+- Manual entries are never overwritten
+
+---
 
 ## Multi-Project Configuration Strategies
 
@@ -238,15 +410,48 @@ Create **separate** automation rules for each project:
 
 ## Troubleshooting
 
+### Jira Cloud UI Issues
+
+**"I can't find the Automation menu"**
+- You need Jira Administrator permissions
+- Check: Settings (⚙️) → System → look for "Automation" under "APPS" section
+- If not there, contact your Jira admin to request Automation access
+
+**"I can't find the 'New trigger' button"**
+- After selecting the first trigger, the button appears below it or in the toolbar
+- Try scrolling down - it might be below the trigger configuration panel
+- Look for "+ Add trigger" or a "+" icon in the WHEN section
+
+**"I can't find 'JQL condition' in the condition types"**
+- It might be called "Advanced compare condition" or just "Advanced"
+- Try searching for "JQL" in the condition type search box
+- Some Jira Cloud instances hide it under a "More" or "Advanced" submenu
+
+**"The smart value {{issue.key}} isn't working"**
+- Make sure you typed it exactly: `{{issue.key}}` with double curly braces
+- Don't use single braces `{issue.key}` - that won't work
+- The preview might show `{{issue.key}}` literally - that's normal, it gets replaced at runtime
+
+**"I can't find the 'Turn it on' button"**
+- Look for a toggle switch near the rule name (top-right)
+- Or a "Publish" button
+- Or a status dropdown where you can change from "Draft" to "Enabled"
+- Some versions require you to click "Save" first, then "Enable"
+
+**"The audit log is empty even though I created test issues"**
+- Make sure the rule status is "Enabled" (not Draft or Disabled)
+- Check that your test issue matches the trigger (Activity Type was empty or you just created it)
+- Check that the JQL condition matches your test issue (run the JQL in issue search to verify)
+
 ### Issue Not Classified
 
-**Check:**
-1. Activity Type field is empty (rule skips classified issues)
-2. Issue type is Story, Bug, Spike, Task, or Epic
-3. Project key is in your automation JQL filter
-4. Project key is in Org Pulse Settings → Classification → "Jira Projects"
-5. Org Pulse endpoint is reachable from Jira
-6. Check automation rule audit log for errors
+**Checklist:**
+1. ✓ Activity Type field is empty (rule skips classified issues)
+2. ✓ Issue type is Story, Bug, Spike, Task, Epic, Vulnerability, or Weakness
+3. ✓ Project key is in your automation JQL filter
+4. ✓ Project key is in Org Pulse Settings → Classification → "Jira Projects"
+5. ✓ Automation rule status is "Enabled" (not Draft)
+6. ✓ Check automation rule audit log for execution attempts
 
 **Verify project configuration:**
 ```bash
@@ -300,15 +505,34 @@ If >20% of issues remain unclassified:
 **Symptoms:**
 - No issues are being classified
 - Jira automation audit log shows no executions
+- Or audit log shows executions, but Org Pulse test returns "project not configured"
 
-**Fix:**
-1. Verify project keys exist in Jira:
-   ```bash
-   curl -s -u "${JIRA_EMAIL}:${JIRA_TOKEN}" \
-     "https://redhat.atlassian.net/rest/api/3/project/YOUR-KEY"
-   ```
-2. Update JQL filter in automation rule with correct keys
-3. Update Org Pulse Settings with same keys
+**Root cause:** Project key mismatch between Jira automation JQL and Org Pulse Settings.
+
+**How to fix:**
+
+1. **Find the correct project key** (see "How to Find Your Jira Project Key" section above)
+
+2. **Update Org Pulse Settings:**
+   - Go to Org Pulse → Settings → Allocation Tracker → Classification
+   - In "Jira Projects" field, replace the wrong key with the correct one
+   - Click "Save Configuration"
+   - Test with a real issue key to verify it works
+
+3. **Update Jira automation rule:**
+   - Go to Jira Settings → System → Automation
+   - Click on your "Auto-Classify Activity Type" rule
+   - Click "Edit" or the pencil icon
+   - Find the JQL condition (in the IF section)
+   - Update the project key in the JQL to match what you put in Org Pulse
+   - Click "Save" or "Update"
+
+4. **Verify they match:**
+   - Org Pulse "Jira Projects" field: `AIPCC, CORRECTKEY`
+   - Jira automation JQL: `project in (AIPCC, CORRECTKEY) AND ...`
+   - These must be **identical**
+
+5. **Test again** by creating a new issue
 
 ## Adding More Projects Later
 
