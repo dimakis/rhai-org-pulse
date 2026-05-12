@@ -1,107 +1,110 @@
 const { fetchVersions, fetchBugs, getComponents } = require('./data-fetcher.js');
 const { computeCumulativeBugData } = require('./calculations.js');
 
+const PROJECTS = ['RHOAIENG', 'AIPCC', 'RHAIENG', 'INFERENG'];
+
 module.exports = function registerRoutes(router, context) {
   const { storage, requireAdmin } = context;
 
-  router.get('/versions', function(req, res) {
-    const versions = storage.readFromStorage('quality-metrics/versions.json') || [];
-    const componentFilter = req.query.component || null;
-
-    // Compute bug counts per version
-    const projects = ['RHOAIENG', 'AIPCC', 'RHAIENG', 'INFERENG'];
+  function loadAllBugs() {
     const allBugs = [];
-    for (const project of projects) {
+    for (const project of PROJECTS) {
       const bugs = storage.readFromStorage(`quality-metrics/bugs-${project}.json`) || [];
       allBugs.push(...bugs);
     }
+    return allBugs;
+  }
 
-    // Filter bugs by component if specified
-    const filteredBugs = componentFilter
-      ? allBugs.filter(bug => bug.components.includes(componentFilter))
-      : allBugs;
+  router.get('/versions', function(req, res) {
+    try {
+      const versions = storage.readFromStorage('quality-metrics/versions.json') || [];
+      const componentFilter = req.query.component || null;
 
-    const versionsWithCounts = versions.map(version => {
-      const bugCount = filteredBugs.filter(bug =>
-        bug.affectedVersions.includes(version.name)
-      ).length;
-      return { ...version, bugCount };
-    });
+      const allBugs = loadAllBugs();
 
-    // Sort by bug count descending (most bugs first)
-    versionsWithCounts.sort((a, b) => b.bugCount - a.bugCount);
+      const filteredBugs = componentFilter
+        ? allBugs.filter(bug => bug.components.includes(componentFilter))
+        : allBugs;
 
-    res.json(versionsWithCounts);
+      const versionsWithCounts = versions.map(version => {
+        const bugCount = filteredBugs.filter(bug =>
+          bug.affectedVersions.includes(version.name)
+        ).length;
+        return { ...version, bugCount };
+      });
+
+      versionsWithCounts.sort((a, b) => b.bugCount - a.bugCount);
+
+      res.json(versionsWithCounts);
+    } catch (error) {
+      console.error('[quality-metrics] Read versions error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
   });
 
   router.get('/bugs', function(req, res) {
-    const versions = (req.query.versions || '').split(',').filter(Boolean);
-    const component = req.query.component || null;
+    try {
+      const versions = (req.query.versions || '').split(',').filter(Boolean);
+      const component = req.query.component || null;
 
-    if (versions.length === 0) {
-      return res.json({ labels: [], datasets: [] });
-    }
+      if (versions.length === 0) {
+        return res.json({ labels: [], datasets: [] });
+      }
 
-    const projects = ['RHOAIENG', 'AIPCC', 'RHAIENG', 'INFERENG'];
-    const allBugs = [];
-    for (const project of projects) {
-      const bugs = storage.readFromStorage(`quality-metrics/bugs-${project}.json`) || [];
-      allBugs.push(...bugs);
-    }
+      const allBugs = loadAllBugs();
 
-    const versionSet = new Set(versions);
-    let filteredBugs = allBugs.filter(bug =>
-      bug.affectedVersions.some(v => versionSet.has(v))
-    );
-
-    if (component) {
-      filteredBugs = filteredBugs.filter(bug =>
-        bug.components.includes(component)
+      const versionSet = new Set(versions);
+      let filteredBugs = allBugs.filter(bug =>
+        bug.affectedVersions.some(v => versionSet.has(v))
       );
-    }
 
-    const chartData = computeCumulativeBugData(filteredBugs, versions, storage);
-    res.json(chartData);
+      if (component) {
+        filteredBugs = filteredBugs.filter(bug =>
+          bug.components.includes(component)
+        );
+      }
+
+      const chartData = computeCumulativeBugData(filteredBugs, versions, storage);
+      res.json(chartData);
+    } catch (error) {
+      console.error('[quality-metrics] Read bugs error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
   });
 
   router.get('/components', function(req, res) {
-    // Get all bugs across all projects
-    const projects = ['RHOAIENG', 'AIPCC', 'RHAIENG', 'INFERENG'];
-    const allBugs = [];
-    for (const project of projects) {
-      const bugs = storage.readFromStorage(`quality-metrics/bugs-${project}.json`) || [];
-      allBugs.push(...bugs);
-    }
+    try {
+      const allBugs = loadAllBugs();
 
-    // Compute bug counts per component
-    const componentCounts = {};
-    for (const bug of allBugs) {
-      for (const comp of bug.components) {
-        componentCounts[comp] = (componentCounts[comp] || 0) + 1;
+      const componentCounts = {};
+      for (const bug of allBugs) {
+        for (const comp of bug.components) {
+          componentCounts[comp] = (componentCounts[comp] || 0) + 1;
+        }
       }
+
+      const componentsWithCounts = Object.entries(componentCounts)
+        .map(([name, count]) => ({ name, count }))
+        .sort((a, b) => b.count - a.count);
+
+      res.json(componentsWithCounts);
+    } catch (error) {
+      console.error('[quality-metrics] Read components error:', error);
+      res.status(500).json({ error: 'Internal server error' });
     }
-
-    // Convert to array and sort by count descending
-    const componentsWithCounts = Object.entries(componentCounts)
-      .map(([name, count]) => ({ name, count }))
-      .sort((a, b) => b.count - a.count);
-
-    res.json(componentsWithCounts);
   });
 
   router.post('/refresh', requireAdmin, async function(req, res) {
     try {
-      const projects = ['RHOAIENG', 'AIPCC', 'RHAIENG', 'INFERENG'];
-
-      const versions = await fetchVersions(projects);
+      const versions = await fetchVersions(PROJECTS);
       storage.writeToStorage('quality-metrics/versions.json', versions);
 
-      for (const project of projects) {
+      for (const project of PROJECTS) {
         const bugs = await fetchBugs(project, versions);
         storage.writeToStorage(`quality-metrics/bugs-${project}.json`, bugs);
       }
 
-      const components = await getComponents(projects);
+      const components = await getComponents(PROJECTS);
       storage.writeToStorage('quality-metrics/components.json', components);
 
       res.json({ success: true, fetchedAt: new Date().toISOString() });

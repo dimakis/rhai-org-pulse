@@ -1,16 +1,12 @@
-const { jiraRequest, fetchAllJqlResults } = require('../../../shared/server/jira');
+const jira = require('../../../shared/server/jira');
 
-/**
- * Fetch all Fix Versions with release dates from specified projects
- * @param {string[]} projects - ['RHOAIENG', 'AIPCC', 'RHAIENG', 'INFERENG']
- * @returns {Promise<Array>} - [{ name, releaseDate, project, released }, ...]
- */
-async function fetchVersions(projects) {
+async function fetchVersions(projects, { jiraFetch } = {}) {
+  const request = jiraFetch || jira.jiraRequest;
   const versions = [];
 
   for (const project of projects) {
     try {
-      const data = await jiraRequest(`/rest/api/3/project/${project}/versions`);
+      const data = await request(`/rest/api/3/project/${project}/versions`);
 
       for (const version of data) {
         if (version.releaseDate) {
@@ -47,7 +43,8 @@ async function fetchVersions(projects) {
  * @param {Array} versions - Version objects with release dates
  * @returns {Promise<Array>} - Bug objects
  */
-async function fetchBugs(project, versions) {
+async function fetchBugs(project, versions, { jiraFetchAll } = {}) {
+  const fetchAll = jiraFetchAll || jira.fetchAllJqlResults;
   const versionReleaseMap = new Map();
   for (const v of versions) {
     if (v.project === project) {
@@ -75,7 +72,7 @@ async function fetchBugs(project, versions) {
   ].join(',');
 
   try {
-    const issues = await fetchAllJqlResults(jiraRequest, jql, fields);
+    const issues = await fetchAll(jira.jiraRequest, jql, fields);
 
     return issues.map(issue => {
       const affectedVersions = (issue.fields.versions || []).map(v => v.name);
@@ -114,12 +111,13 @@ async function fetchBugs(project, versions) {
  * @param {string[]} projects - Project keys
  * @returns {Promise<Array>} - Sorted component names
  */
-async function getComponents(projects) {
+async function getComponents(projects, { jiraFetch } = {}) {
+  const request = jiraFetch || jira.jiraRequest;
   const componentSet = new Set();
 
   for (const project of projects) {
     try {
-      const data = await jiraRequest(`/rest/api/3/project/${project}/components`);
+      const data = await request(`/rest/api/3/project/${project}/components`);
       for (const comp of data) {
         componentSet.add(comp.name);
       }

@@ -1,23 +1,16 @@
 // @vitest-environment node
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { fetchVersions, fetchBugs, getComponents } from '../data-fetcher.js';
 
-vi.mock('../../../../shared/server/jira');
-import { jiraRequest, fetchAllJqlResults } from '../../../../shared/server/jira.js';
-
 describe('fetchVersions', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
   it('returns sorted versions with release dates', async () => {
-    vi.mocked(jiraRequest).mockResolvedValue([
+    const jiraFetch = vi.fn().mockResolvedValue([
       { name: 'v2.0', releaseDate: '2026-02-01', released: true },
       { name: 'v1.0', releaseDate: '2026-01-01', released: true },
       { name: 'unreleased', released: false }
     ]);
 
-    const result = await fetchVersions(['RHOAIENG']);
+    const result = await fetchVersions(['RHOAIENG'], { jiraFetch });
 
     expect(result).toEqual([
       { name: 'v2.0', releaseDate: '2026-02-01', project: 'RHOAIENG', released: true },
@@ -26,37 +19,33 @@ describe('fetchVersions', () => {
   });
 
   it('filters out versions without release dates', async () => {
-    vi.mocked(jiraRequest).mockResolvedValue([
+    const jiraFetch = vi.fn().mockResolvedValue([
       { name: 'v1.0', releaseDate: '2026-01-01', released: true },
       { name: 'future-version', released: false }
     ]);
 
-    const result = await fetchVersions(['RHOAIENG']);
+    const result = await fetchVersions(['RHOAIENG'], { jiraFetch });
 
     expect(result).toHaveLength(1);
     expect(result[0].name).toBe('v1.0');
   });
 
   it('handles fetch errors gracefully', async () => {
-    vi.mocked(jiraRequest).mockRejectedValue(new Error('Network error'));
+    const jiraFetch = vi.fn().mockRejectedValue(new Error('Network error'));
 
-    const result = await fetchVersions(['RHOAIENG']);
+    const result = await fetchVersions(['RHOAIENG'], { jiraFetch });
 
     expect(result).toEqual([]);
   });
 });
 
 describe('fetchBugs', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
   it('filters bugs created before release date', async () => {
     const versions = [
       { name: 'v1.0', releaseDate: '2026-01-10', project: 'RHOAIENG' }
     ];
 
-    vi.mocked(fetchAllJqlResults).mockResolvedValue([
+    const jiraFetchAll = vi.fn().mockResolvedValue([
       {
         key: 'BUG-1',
         fields: {
@@ -83,7 +72,7 @@ describe('fetchBugs', () => {
       }
     ]);
 
-    const result = await fetchBugs('RHOAIENG', versions);
+    const result = await fetchBugs('RHOAIENG', versions, { jiraFetchAll });
 
     expect(result).toHaveLength(1);
     expect(result[0].key).toBe('BUG-2');
@@ -94,7 +83,7 @@ describe('fetchBugs', () => {
       { name: 'v1.0', releaseDate: '2026-01-01', project: 'RHOAIENG' }
     ];
 
-    vi.mocked(fetchAllJqlResults).mockResolvedValue([
+    const jiraFetchAll = vi.fn().mockResolvedValue([
       {
         key: 'BUG-1',
         fields: {
@@ -109,7 +98,7 @@ describe('fetchBugs', () => {
       }
     ]);
 
-    const result = await fetchBugs('RHOAIENG', versions);
+    const result = await fetchBugs('RHOAIENG', versions, { jiraFetchAll });
 
     expect(result[0]).toEqual({
       key: 'BUG-1',
@@ -125,21 +114,17 @@ describe('fetchBugs', () => {
   });
 
   it('handles fetch errors gracefully', async () => {
-    vi.mocked(fetchAllJqlResults).mockRejectedValue(new Error('JQL error'));
+    const jiraFetchAll = vi.fn().mockRejectedValue(new Error('JQL error'));
 
-    const result = await fetchBugs('RHOAIENG', []);
+    const result = await fetchBugs('RHOAIENG', [], { jiraFetchAll });
 
     expect(result).toEqual([]);
   });
 });
 
 describe('getComponents', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
   it('deduplicates component names', async () => {
-    jiraRequest
+    const jiraFetch = vi.fn()
       .mockResolvedValueOnce([
         { name: 'Dashboard' },
         { name: 'API' }
@@ -149,15 +134,15 @@ describe('getComponents', () => {
         { name: 'Workbenches' }
       ]);
 
-    const result = await getComponents(['RHOAIENG', 'AIPCC']);
+    const result = await getComponents(['RHOAIENG', 'AIPCC'], { jiraFetch });
 
     expect(result).toEqual(['API', 'Dashboard', 'Workbenches']);
   });
 
   it('handles fetch errors gracefully', async () => {
-    vi.mocked(jiraRequest).mockRejectedValue(new Error('Network error'));
+    const jiraFetch = vi.fn().mockRejectedValue(new Error('Network error'));
 
-    const result = await getComponents(['RHOAIENG']);
+    const result = await getComponents(['RHOAIENG'], { jiraFetch });
 
     expect(result).toEqual([]);
   });
