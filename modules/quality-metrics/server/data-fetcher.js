@@ -1,0 +1,134 @@
+const { jiraRequest, fetchAllJqlResults } = require('../../../shared/server/jira');
+
+/**
+ * Fetch all Fix Versions with release dates from specified projects
+ * @param {string[]} projects - ['RHOAIENG', 'AIPCC', 'RHAIENG', 'INFERENG']
+ * @returns {Promise<Array>} - [{ name, releaseDate, project, released }, ...]
+ */
+async function fetchVersions(projects) {
+  const versions = [];
+
+  for (const project of projects) {
+    try {
+      const data = await jiraRequest(`/rest/api/3/project/${project}/versions`);
+
+      for (const version of data) {
+        if (version.releaseDate) {
+          versions.push({
+            name: version.name,
+            releaseDate: version.releaseDate,
+            project: project,
+            released: version.released || false
+          });
+        }
+      }
+    } catch (error) {
+      console.warn(`[quality-metrics] Failed to fetch versions for ${project}:`, error.message);
+    }
+  }
+
+  // Deduplicate versions by name (case-insensitive, keep first occurrence)
+  const seen = new Map();
+  const deduplicated = [];
+  for (const version of versions) {
+    const normalizedName = version.name.toLowerCase();
+    if (!seen.has(normalizedName)) {
+      seen.set(normalizedName, true);
+      deduplicated.push(version);
+    }
+  }
+
+  return deduplicated.sort((a, b) => new Date(b.releaseDate) - new Date(a.releaseDate));
+}
+
+/**
+ * Fetch Blocker/Critical/Major bugs with Affects Version
+ * @param {string} project - Project key
+ * @param {Array} versions - Version objects with release dates
+ * @returns {Promise<Array>} - Bug objects
+ */
+async function fetchBugs(project, versions) {
+  const versionReleaseMap = new Map();
+  for (const v of versions) {
+    if (v.project === project) {
+      versionReleaseMap.set(v.name, v.releaseDate);
+    }
+  }
+
+  const jql = `
+    project = ${project}
+    AND priority in (Blocker, Critical, Major)
+    AND issuetype = Bug
+    AND affectedVersion is not EMPTY
+    ORDER BY created DESC
+  `.trim().replace(/\s+/g, ' ');
+
+  const fields = [
+    'summary',
+    'priority',
+    'issuetype',
+    'status',
+    'versions',
+    'components',
+    'created',
+    'resolutiondate'
+  ].join(',');
+
+  try {
+    const issues = await fetchAllJqlResults(jiraRequest, jql, fields);
+
+    return issues.map(issue => {
+      const affectedVersions = (issue.fields.versions || []).map(v => v.name);
+      const components = (issue.fields.components || []).map(c => c.name);
+
+      let releaseDate = null;
+      for (const vName of affectedVersions) {
+        const vDate = versionReleaseMap.get(vName);
+        if (vDate && (!releaseDate || vDate < releaseDate)) {
+          releaseDate = vDate;
+        }
+      }
+
+      return {
+        key: issue.key,
+        summary: issue.fields.summary,
+        priority: issue.fields.priority?.name || 'Unknown',
+        status: issue.fields.status?.name || 'Unknown',
+        affectedVersions,
+        components,
+        created: issue.fields.created,
+        resolved: issue.fields.resolutiondate || null,
+        releaseDate
+      };
+    }).filter(bug =>
+      bug.releaseDate && new Date(bug.created) >= new Date(bug.releaseDate)
+    );
+  } catch (error) {
+    console.error(`[quality-metrics] Failed to fetch bugs for ${project}:`, error.message);
+    return [];
+  }
+}
+
+/**
+ * Fetch all unique components from specified projects
+ * @param {string[]} projects - Project keys
+ * @returns {Promise<Array>} - Sorted component names
+ */
+async function getComponents(projects) {
+  const componentSet = new Set();
+
+  for (const project of projects) {
+    try {
+      const data = await jiraRequest(`/rest/api/3/project/${project}/components`);
+      for (const comp of data) {
+        componentSet.add(comp.name);
+      }
+    } catch (error) {
+      console.warn(`[quality-metrics] Failed to fetch components for ${project}:`, error.message);
+    }
+  }
+
+  return Array.from(componentSet).sort();
+}
+
+module.exports = { fetchVersions, fetchBugs, getComponents };

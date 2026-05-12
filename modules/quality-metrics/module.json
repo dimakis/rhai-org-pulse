@@ -1,0 +1,22 @@
+{
+  "name": "Quality Metrics",
+  "slug": "quality-metrics",
+  "description": "Track post-release defect quality and progress toward OKRs",
+  "icon": "activity",
+  "order": 60,
+  "defaultEnabled": true,
+  "client": {
+    "entry": "./client/index.js",
+    "navItems": [
+      {
+        "id": "defects",
+        "label": "Post-Release Defects",
+        "icon": "bug",
+        "default": true
+      }
+    ]
+  },
+  "server": {
+    "entry": "./server/index.js"
+  }
+}
