@@ -11,7 +11,7 @@
       { "id": "main", "label": "Release Analysis", "icon": "ChartColumnStacked", "default": true },
       { "id": "project-breakdown", "label": "Component Breakdown", "icon": "FolderTree" },
       { "id": "conforma-exceptions", "label": "Conforma Insights", "icon": "ShieldAlert" },
-      { "id": "quality", "label": "Post-Release Defects", "icon": "bug" }
+      { "id": "quality", "label": "Post-Release Defects", "icon": "Bug" }
     ],
     "settingsComponent": "./client/components/ReleaseAnalysisSettings.vue"
   },

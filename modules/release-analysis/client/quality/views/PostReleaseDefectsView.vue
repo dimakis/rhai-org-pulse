@@ -99,8 +99,7 @@ watch(selectedComponent, async () => {
   }
 });
 
-// Watch versions/component for chart data updates
-watch([selectedVersions, selectedComponent], async () => {
+watch(selectedVersions, async () => {
   if (selectedVersions.value.length > 0) {
     const response = await getBugData(selectedVersions.value, selectedComponent.value);
     chartData.value = { labels: response.labels, datasets: response.datasets };

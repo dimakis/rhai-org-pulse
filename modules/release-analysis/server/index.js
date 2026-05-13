@@ -1170,6 +1170,21 @@ module.exports = function registerRoutes(router, context) {
     return allBugs
   }
 
+  /**
+   * @openapi
+   * /api/modules/release-analysis/quality/versions:
+   *   get:
+   *     tags: ['Release Analysis: Quality']
+   *     summary: List release versions with bug counts
+   *     parameters:
+   *       - in: query
+   *         name: component
+   *         schema: { type: string }
+   *         description: Filter bug counts by component
+   *     responses:
+   *       200:
+   *         description: Versions sorted by bug count
+   */
   router.get('/quality/versions', requireAuth, function(req, res) {
     try {
       const versions = readFromStorage('release-analysis/quality/versions.json') || []
@@ -1197,6 +1212,26 @@ module.exports = function registerRoutes(router, context) {
     }
   })
 
+  /**
+   * @openapi
+   * /api/modules/release-analysis/quality/bugs:
+   *   get:
+   *     tags: ['Release Analysis: Quality']
+   *     summary: Get cumulative bug data for selected versions
+   *     parameters:
+   *       - in: query
+   *         name: versions
+   *         required: true
+   *         schema: { type: string }
+   *         description: Comma-separated version names
+   *       - in: query
+   *         name: component
+   *         schema: { type: string }
+   *         description: Filter by component
+   *     responses:
+   *       200:
+   *         description: Chart data with labels and datasets
+   */
   router.get('/quality/bugs', requireAuth, function(req, res) {
     try {
       const versions = (req.query.versions || '').split(',').filter(Boolean)
@@ -1227,6 +1262,16 @@ module.exports = function registerRoutes(router, context) {
     }
   })
 
+  /**
+   * @openapi
+   * /api/modules/release-analysis/quality/components:
+   *   get:
+   *     tags: ['Release Analysis: Quality']
+   *     summary: List components with bug counts
+   *     responses:
+   *       200:
+   *         description: Components sorted by bug count
+   */
   router.get('/quality/components', requireAuth, function(req, res) {
     try {
       const allBugs = loadAllBugs()
@@ -1249,6 +1294,18 @@ module.exports = function registerRoutes(router, context) {
     }
   })
 
+  /**
+   * @openapi
+   * /api/modules/release-analysis/quality/refresh:
+   *   post:
+   *     tags: ['Release Analysis: Quality']
+   *     summary: Refresh quality data from Jira (admin)
+   *     responses:
+   *       200:
+   *         description: Refresh completed
+   *       403:
+   *         description: Admin required
+   */
   router.post('/quality/refresh', requireAdmin, async function(req, res) {
     try {
       const versions = await fetchQualityVersions(QUALITY_PROJECTS)

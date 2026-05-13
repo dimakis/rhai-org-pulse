@@ -6,7 +6,7 @@
  * @returns {Object} - { labels: [0, 1, 2, ...], datasets: [{ label, data }, ...] }
  */
 function computeCumulativeBugData(bugs, versions, storage) {
-  const allVersions = storage.readFromStorage('quality-metrics/versions.json') || [];
+  const allVersions = storage.readFromStorage('release-analysis/quality/versions.json') || [];
   const versionReleaseMap = new Map(allVersions.map(v => [v.name, v.releaseDate]));
 
   const versionBugs = new Map();

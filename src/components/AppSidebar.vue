@@ -265,7 +265,8 @@ import {
   BookOpen,
   History,
   Hospital,
-  LayoutDashboard
+  LayoutDashboard,
+  Bug
 } from 'lucide-vue-next'
 import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 
@@ -309,7 +310,8 @@ const ICON_MAP = {
   History,
   Hospital,
   'hospital': Hospital,
-  LayoutDashboard
+  LayoutDashboard,
+  Bug
 }
 
 const props = defineProps({
