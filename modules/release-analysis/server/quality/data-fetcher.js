@@ -1,4 +1,4 @@
-const jira = require('../../../shared/server/jira');
+const jira = require('../../../../shared/server/jira');
 
 async function fetchVersions(projects, { jiraFetch } = {}) {
   const request = jiraFetch || jira.jiraRequest;
