@@ -1,6 +1,6 @@
 import { apiRequest } from '@shared/client';
 
-const BASE = '/modules/quality-metrics';
+const BASE = '/modules/release-analysis/quality';
 
 export async function getVersions(component = null) {
   const params = component ? `?component=${encodeURIComponent(component)}` : '';
