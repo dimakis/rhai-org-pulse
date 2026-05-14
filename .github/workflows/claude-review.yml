@@ -200,16 +200,40 @@ jobs:
             exit 0
           fi
 
+          BLOCKED=false
+
           # Check the verdict file Claude was instructed to write
           if [ -f .claude-review-result ]; then
             RESULT=$(tr -d '[:space:]' < .claude-review-result)
             if [ "$RESULT" = "FAIL" ]; then
-              echo "::error::Claude review found critical issues that must be addressed before merging"
-              exit 1
+              echo "::error::Claude review verdict: FAIL"
+              BLOCKED=true
             fi
           fi
 
+          # Safety net: check Claude's own comment for unfixed issues it reported
+          # but didn't reflect in its verdict. Fetch the most recent claude bot
+          # comment and look for the "Issues found but NOT fixed" section.
+          PR_NUM="${{ github.event.pull_request.number || github.event.issue.number }}"
+          if [ -n "$PR_NUM" ]; then
+            LATEST_COMMENT=$(gh pr view "$PR_NUM" --json comments \
+              --jq '[.comments[] | select(.author.login == "claude")] | last | .body // ""')
+            if echo "$LATEST_COMMENT" | grep -qi "Issues found but NOT fixed"; then
+              # Check if any unfixed issue references a hard constraint
+              if echo "$LATEST_COMMENT" | grep -qi "Hard Constraint"; then
+                echo "::error::Claude reported unfixed hard constraint violation(s) but did not set FAIL verdict"
+                BLOCKED=true
+              fi
+            fi
+          fi
+
+          if [ "$BLOCKED" = "true" ]; then
+            exit 1
+          fi
+
           echo "Claude review passed"
+        env:
+          GH_TOKEN: ${{ github.token }}
 
   # Read-only review for fork PRs — never executes fork code
   claude-review-fork:
