@@ -95,18 +95,8 @@ function handleRetry() {
 }
 
 function handleSelectRFE(rfe) {
-  const linkedFeature = rfeToFeature.value[rfe.key]
-  if (linkedFeature) {
-    // Navigate to Feature Traffic Feature page
-    crossNavigate('feature-traffic', 'feature-detail', {
-      key: linkedFeature.key,
-      fromRfe: rfe.key
-    })
-  } else {
-    // No linked feature — fall back to showing the modal
-    selectedRFE.value = rfe
-    moduleNav.navigateTo('rfe-review', { select: rfe.key })
-  }
+  selectedRFE.value = rfe
+  moduleNav.navigateTo('rfe-review', { select: rfe.key })
 }
 
 function handleCloseModal() {
@@ -115,7 +105,10 @@ function handleCloseModal() {
 }
 
 function handleNavigateToFeature(featureKey) {
-  crossNavigate('feature-traffic', 'feature-detail', { key: featureKey })
+  crossNavigate('feature-traffic', 'feature-detail', {
+    key: featureKey,
+    fromRfe: selectedRFE.value?.key
+  })
 }
 
 // Handle incoming select param (cross-link from Feature Review)
