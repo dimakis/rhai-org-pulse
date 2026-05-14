@@ -354,4 +354,49 @@ module.exports = function registerAllocationRoutes(router, context) {
     }
   });
 
+  // ─── Classification config (for GitLab pipeline) ───
+
+  /**
+   * @openapi
+   * /api/modules/team-tracker/allocation/classification/config:
+   *   get:
+   *     tags: ['Allocation']
+   *     summary: Get classification config for GitLab pipeline
+   *     description: Returns configuration used by the external classification pipeline
+   *     responses:
+   *       200:
+   *         description: Classification configuration
+   *         content:
+   *           application/json:
+   *             schema:
+   *               type: object
+   *               properties:
+   *                 enabled:
+   *                   type: boolean
+   *                 projects:
+   *                   type: array
+   *                   items:
+   *                     type: string
+   *                 confidenceThreshold:
+   *                   type: number
+   *                 issueTypes:
+   *                   type: array
+   *                   items:
+   *                     type: string
+   */
+  router.get('/allocation/classification/config', function(_req, res) {
+    try {
+      const config = allocRead('classification-config.json') || {
+        enabled: true,
+        projects: ['AIPCC', 'RHOAIENG', 'INFERENG', 'RHAIENG'],
+        confidenceThreshold: 0.85,
+        issueTypes: ['Story', 'Bug', 'Spike', 'Task', 'Epic', 'Vulnerability', 'Weakness']
+      };
+      res.json(config);
+    } catch (error) {
+      console.error('[allocation] Read classification config error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
 };
