@@ -68,9 +68,9 @@ function closeDrillDown() {
     <template v-else-if="data">
       <!-- Metadata -->
       <div class="text-xs text-gray-400 dark:text-gray-500 mb-4">
-        Data: {{ new Date(data.metadata.data_timestamp).toLocaleDateString() }}
+        Data fetched: {{ new Date(data.metadata.data_timestamp).toLocaleString() }}
         &middot;
-        Generated: {{ new Date(data.metadata.generated_at).toLocaleString() }}
+        Report generated: {{ new Date(data.metadata.generated_at).toLocaleString() }}
       </div>
 
       <!-- Executive summary table -->
@@ -158,62 +158,64 @@ function closeDrillDown() {
 
       <!-- Category tables for selected release -->
       <template v-if="releaseData">
-        <!-- TV-Only -->
-        <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden mb-4">
-          <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
-            <h3 class="text-sm font-semibold text-yellow-700 dark:text-yellow-400">
+        <!-- TV-Only (collapsible) -->
+        <details open class="bg-white dark:bg-gray-800 rounded-lg border border-yellow-200 dark:border-yellow-800 overflow-hidden mb-4">
+          <summary class="px-4 py-3 cursor-pointer hover:bg-yellow-50 dark:hover:bg-yellow-900/10 flex items-center justify-between">
+            <span class="text-sm font-semibold text-yellow-700 dark:text-yellow-400">
               TV-Only — PM targeted, no ENG commitment ({{ releaseData.tv_only.length }})
-            </h3>
+            </span>
             <a
               v-if="releaseSummary"
               :href="releaseSummary.tv_only_jql"
               target="_blank"
               rel="noopener noreferrer"
               class="text-xs text-blue-600 dark:text-blue-400 hover:underline"
+              @click.stop
             >
               View in Jira &rarr;
             </a>
-          </div>
+          </summary>
           <FeatureTable
             :features="releaseData.tv_only"
-            :columns="['key', 'summary', 'status', 'color_status', 'team', 'assignee']"
+            :columns="['key', 'summary', 'status', 'color_status', 'component', 'assignee']"
           />
-        </div>
+        </details>
 
-        <!-- FV-Only -->
-        <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden mb-4">
-          <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
-            <h3 class="text-sm font-semibold text-gray-600 dark:text-gray-400">
+        <!-- FV-Only (collapsible) -->
+        <details class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden mb-4">
+          <summary class="px-4 py-3 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50 flex items-center justify-between">
+            <span class="text-sm font-semibold text-gray-600 dark:text-gray-400">
               FV-Only — ENG committed, not PM-planned ({{ releaseData.fv_only.length }})
-            </h3>
+            </span>
             <a
               v-if="releaseSummary"
               :href="releaseSummary.fv_only_jql"
               target="_blank"
               rel="noopener noreferrer"
               class="text-xs text-blue-600 dark:text-blue-400 hover:underline"
+              @click.stop
             >
               View in Jira &rarr;
             </a>
-          </div>
+          </summary>
           <FeatureTable
             :features="releaseData.fv_only"
-            :columns="['key', 'summary', 'status', 'color_status', 'team', 'assignee']"
+            :columns="['key', 'summary', 'status', 'color_status', 'component', 'assignee']"
           />
-        </div>
+        </details>
 
-        <!-- Mismatched -->
-        <div v-if="releaseData.mismatched.length" class="bg-white dark:bg-gray-800 rounded-lg border border-red-200 dark:border-red-800 overflow-hidden mb-4">
-          <div class="px-4 py-3 border-b border-red-200 dark:border-red-800">
-            <h3 class="text-sm font-semibold text-red-700 dark:text-red-400">
+        <!-- Mismatched (collapsible) -->
+        <details v-if="releaseData.mismatched.length" open class="bg-white dark:bg-gray-800 rounded-lg border border-red-200 dark:border-red-800 overflow-hidden mb-4">
+          <summary class="px-4 py-3 cursor-pointer hover:bg-red-50 dark:hover:bg-red-900/10">
+            <span class="text-sm font-semibold text-red-700 dark:text-red-400">
               Mismatched — TV and FV disagree ({{ releaseData.mismatched.length }})
-            </h3>
-          </div>
+            </span>
+          </summary>
           <FeatureTable
             :features="releaseData.mismatched"
-            :columns="['key', 'summary', 'target_version', 'fix_versions', 'team', 'assignee']"
+            :columns="['key', 'summary', 'target_version', 'fix_versions', 'component', 'assignee']"
           />
-        </div>
+        </details>
 
         <!-- Aligned (collapsed by default) -->
         <details class="bg-white dark:bg-gray-800 rounded-lg border border-green-200 dark:border-green-800 overflow-hidden mb-4">
@@ -224,70 +226,16 @@ function closeDrillDown() {
           </summary>
           <FeatureTable
             :features="releaseData.aligned"
-            :columns="['key', 'summary', 'status', 'color_status', 'team']"
+            :columns="['key', 'summary', 'status', 'color_status', 'component']"
           />
         </details>
       </template>
 
-      <!-- Team breakdown -->
-      <div v-if="data.team_breakdown.length" class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden mb-4">
-        <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
-          <h2 class="text-sm font-semibold text-gray-700 dark:text-gray-300">Team Breakdown</h2>
-        </div>
-        <div class="overflow-x-auto">
-          <table class="min-w-full text-sm">
-            <thead>
-              <tr class="bg-gray-50 dark:bg-gray-800/50">
-                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Team</th>
-                <th class="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Total</th>
-                <th class="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Aligned</th>
-                <th class="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">TV-Only</th>
-                <th class="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">FV-Only</th>
-                <th class="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Mismatched</th>
-                <th class="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Alignment</th>
-                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">PMs</th>
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
-              <tr
-                v-for="team in data.team_breakdown"
-                :key="team.team"
-                class="hover:bg-gray-50 dark:hover:bg-gray-800/50"
-              >
-                <td class="px-4 py-2 font-medium text-gray-900 dark:text-gray-100">{{ team.team }}</td>
-                <td class="px-4 py-2 text-right">
-                  <ClickableCount :count="team.total" :jql="team.total_jql" label="Total" />
-                </td>
-                <td class="px-4 py-2 text-right font-medium text-green-600 dark:text-green-400">{{ team.aligned }}</td>
-                <td class="px-4 py-2 text-right font-medium text-yellow-600 dark:text-yellow-400">{{ team.tv_only }}</td>
-                <td class="px-4 py-2 text-right text-gray-500">{{ team.fv_only }}</td>
-                <td class="px-4 py-2 text-right font-medium text-red-600 dark:text-red-400">{{ team.mismatched }}</td>
-                <td class="px-4 py-2 text-right">
-                  <span
-                    class="font-semibold"
-                    :class="{
-                      'text-red-600 dark:text-red-400': team.alignment_pct < 50,
-                      'text-yellow-600 dark:text-yellow-400': team.alignment_pct >= 50 && team.alignment_pct < 75,
-                      'text-green-600 dark:text-green-400': team.alignment_pct >= 75,
-                    }"
-                  >
-                    {{ team.alignment_pct }}%
-                  </span>
-                </td>
-                <td class="px-4 py-2 text-xs text-gray-500 dark:text-gray-400 max-w-xs truncate">
-                  {{ team.product_managers }}
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <!-- Component breakdown -->
-      <div v-if="data.component_breakdown.length" class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden mb-4">
-        <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
-          <h2 class="text-sm font-semibold text-gray-700 dark:text-gray-300">Component Breakdown</h2>
-        </div>
+      <!-- Component breakdown (collapsible) -->
+      <details v-if="data.component_breakdown.length" class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden mb-4">
+        <summary class="px-4 py-3 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50">
+          <span class="text-sm font-semibold text-gray-700 dark:text-gray-300">Component Breakdown</span>
+        </summary>
         <div class="overflow-x-auto">
           <table class="min-w-full text-sm">
             <thead>
@@ -331,7 +279,7 @@ function closeDrillDown() {
             </tbody>
           </table>
         </div>
-      </div>
+      </details>
     </template>
 
     <!-- Drill-down modal -->
@@ -353,7 +301,7 @@ function closeDrillDown() {
         <div class="overflow-auto flex-1 p-4">
           <FeatureTable
             :features="drillDown.features"
-            :columns="['key', 'summary', 'status', 'color_status', 'team', 'assignee']"
+            :columns="['key', 'summary', 'status', 'color_status', 'component', 'assignee']"
           />
         </div>
       </div>

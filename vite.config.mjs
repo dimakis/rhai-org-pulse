@@ -15,11 +15,11 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': {
-        target: 'http://localhost:3001',
+        target: 'http://localhost:' + (process.env.API_PORT || '3001'),
         changeOrigin: true
       },
       '/modules': {
-        target: 'http://localhost:3001',
+        target: 'http://localhost:' + (process.env.API_PORT || '3001'),
         changeOrigin: true,
         // Only proxy requests for git-static module content (HTML, assets).
         // Let Vite serve source files from the modules/ directory (for import.meta.glob).
