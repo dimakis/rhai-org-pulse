@@ -241,6 +241,9 @@ All routes prefixed with `/api`. Authenticated via OAuth proxy in production.
 - `/api/modules/ai-impact/features` — all features
 - `/api/modules/ai-impact/features/:key` — single feature + history
 - `/api/modules/ai-impact/features/status` — feature status (admin)
+- `/api/modules/deep-analytics/tv-fv-delta` — TV vs FV delta analysis
+- `/api/modules/deep-analytics/release-health` — release healthcheck analysis
+- `/api/modules/deep-analytics/status` — data availability for all datasets
 - `/api/health-metrics/tracking/status` — opt-out status
 - `/api/health-metrics/dashboard` — aggregated dashboard (admin/viewer)
 - `/api/health-metrics/pages` — per-page stats (admin/viewer)
@@ -292,6 +295,7 @@ All routes prefixed with `/api`. Authenticated via OAuth proxy in production.
 - `/api/modules/release-analysis/conforma/bulk` — full replace conforma data (admin)
 - `/api/modules/ai-impact/assessments/bulk` — bulk upsert assessments (admin)
 - `/api/modules/ai-impact/features/bulk` — bulk upsert features (admin)
+- `/api/modules/deep-analytics/ingest/:type` — ingest dataset from pipeline (admin)
 - `/api/health-metrics/track` — record page view (rate-limited)
 - `/api/health-metrics/tracking/opt-out` — opt out (authenticated)
 - `/api/health-metrics/config` — update config (admin)

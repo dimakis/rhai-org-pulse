@@ -47,6 +47,34 @@ function showDrillDown(title, features) {
 function closeDrillDown() {
   drillDown.value = { visible: false, title: '', features: [] }
 }
+
+/**
+ * Parse markdown-style links into segments for safe rendering.
+ * Returns array of { type: 'text'|'link', text, href? } objects.
+ */
+function parseActionLinks(text) {
+  if (!text) return []
+  const parts = []
+  const re = /\[([^\]]+)\]\(([^)]+)\)/g
+  let last = 0
+  let match
+  while ((match = re.exec(text)) !== null) {
+    if (match.index > last) {
+      parts.push({ type: 'text', text: text.slice(last, match.index) })
+    }
+    const href = match[2]
+    if (/^https?:\/\//i.test(href)) {
+      parts.push({ type: 'link', text: match[1], href })
+    } else {
+      parts.push({ type: 'text', text: match[0] })
+    }
+    last = re.lastIndex
+  }
+  if (last < text.length) {
+    parts.push({ type: 'text', text: text.slice(last) })
+  }
+  return parts
+}
 </script>
 
 <template>
@@ -148,7 +176,7 @@ function closeDrillDown() {
             <div
               v-for="(val, color) in data.executive_summary.color_distribution"
               :key="'bar-' + color"
-              :style="{ width: (val.count / data.executive_summary.total_open * 100) + '%' }"
+              :style="{ width: (data.executive_summary.total_open ? (val.count / data.executive_summary.total_open * 100) : 0) + '%' }"
               :class="{
                 'bg-red-500': color === 'red',
                 'bg-yellow-400': color === 'yellow',
@@ -511,7 +539,12 @@ function closeDrillDown() {
                       {{ item.priority }}
                     </span>
                   </td>
-                  <td class="px-3 py-2 text-gray-900 dark:text-gray-100 text-xs" v-html="item.action.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href=\'$2\' target=\'_blank\' class=\'text-blue-600 dark:text-blue-400 hover:underline\'>$1</a>')"></td>
+                  <td class="px-3 py-2 text-gray-900 dark:text-gray-100 text-xs">
+                    <template v-for="(seg, si) in parseActionLinks(item.action)" :key="si">
+                      <a v-if="seg.type === 'link'" :href="seg.href" target="_blank" rel="noopener noreferrer" class="text-blue-600 dark:text-blue-400 hover:underline">{{ seg.text }}</a>
+                      <span v-else>{{ seg.text }}</span>
+                    </template>
+                  </td>
                   <td class="px-3 py-2 text-xs text-gray-500 dark:text-gray-400">{{ item.assignee }}</td>
                   <td class="px-3 py-2 text-xs text-gray-500 dark:text-gray-400 max-w-xs truncate">{{ item.detail }}</td>
                 </tr>
