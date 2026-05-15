@@ -1,0 +1,33 @@
+{
+  "name": "Deep Analytics",
+  "slug": "deep-analytics",
+  "description": "Feature health, TV/FV alignment, and release hygiene analytics powered by Jupyter notebook pipelines",
+  "icon": "Microscope",
+  "order": 45,
+  "client": {
+    "entry": "./client/index.js",
+    "navItems": [
+      {
+        "id": "overview",
+        "label": "Overview",
+        "icon": "LayoutDashboard",
+        "default": true
+      },
+      {
+        "id": "tv-fv-delta",
+        "label": "TV/FV Delta",
+        "icon": "GitCompareArrows"
+      },
+      {
+        "id": "release-health",
+        "label": "Release Health",
+        "icon": "HeartPulse"
+      }
+    ]
+  },
+  "server": {
+    "entry": "./server/index.js"
+  },
+  "requires": [],
+  "defaultEnabled": true
+}
