@@ -33,8 +33,19 @@ async function fetchArtifacts(storage, config, token) {
     throw new Error('projectPath is required');
   }
 
+  // Validate base URL to prevent SSRF via admin config
+  let parsedBase;
+  try {
+    parsedBase = new URL(gitlabBaseUrl);
+  } catch {
+    throw new Error('Invalid gitlabBaseUrl');
+  }
+  if (!['https:', 'http:'].includes(parsedBase.protocol)) {
+    throw new Error('gitlabBaseUrl must use http or https');
+  }
+
   const encodedProject = encodeURIComponent(projectPath);
-  const url = `${gitlabBaseUrl}/api/v4/projects/${encodedProject}/jobs/artifacts/${encodeURIComponent(branch)}/download?job=${encodeURIComponent(jobName)}`;
+  const url = `${parsedBase.origin}/api/v4/projects/${encodedProject}/jobs/artifacts/${encodeURIComponent(branch)}/download?job=${encodeURIComponent(jobName)}`;
 
   console.log(`[releases/execution] Fetching artifacts from ${projectPath} (branch: ${branch}, job: ${jobName})`);
   const startTime = Date.now();

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
-import IssueCountChart from '../../client/components/IssueCountChart.vue'
+import IssueCountChart from '../../../client/deliver/components/IssueCountChart.vue'
 
 vi.mock('vue-chartjs', () => ({
   Doughnut: {

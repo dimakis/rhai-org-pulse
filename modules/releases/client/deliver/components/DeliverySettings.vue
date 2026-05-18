@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { apiRequest } from '@shared/client/services/api.js'
 
 const config = ref(null)
@@ -151,20 +151,31 @@ async function triggerRefresh() {
   }
 }
 
+let pollTimer = null
+
 async function pollRefreshStatus() {
   const poll = async () => {
     try {
       const status = await apiRequest('/modules/releases/delivery/refresh/status')
       refreshStatus.value = status
       if (status.running) {
-        setTimeout(poll, 3000)
+        pollTimer = setTimeout(poll, 3000)
+      } else {
+        pollTimer = null
       }
     } catch {
       // ignore polling errors
     }
   }
-  setTimeout(poll, 2000)
+  pollTimer = setTimeout(poll, 2000)
 }
+
+onUnmounted(() => {
+  if (pollTimer) {
+    clearTimeout(pollTimer)
+    pollTimer = null
+  }
+})
 
 async function checkRefreshStatus() {
   try {

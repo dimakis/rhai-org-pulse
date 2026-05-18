@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
-import BacklogHealthChart from '../../client/components/BacklogHealthChart.vue'
+import BacklogHealthChart from '../../../client/deliver/components/BacklogHealthChart.vue'
 
 vi.mock('vue-chartjs', () => ({
   Bar: {

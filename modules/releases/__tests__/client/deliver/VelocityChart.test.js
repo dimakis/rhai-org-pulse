@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
-import VelocityChart from '../../client/components/VelocityChart.vue'
+import VelocityChart from '../../../client/deliver/components/VelocityChart.vue'
 
 vi.mock('vue-chartjs', () => ({
   Bar: {

@@ -239,7 +239,7 @@ function loadMilestones(readFromStorage, version) {
     return null
   }
 
-  var escapedVersion = version.replace(/\./g, '\\.')
+  var escapedVersion = version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   var ea1Pattern = new RegExp('\\b' + escapedVersion + '[.\\s]EA1\\b', 'i')
   var ea2Pattern = new RegExp('\\b' + escapedVersion + '[.\\s]EA2\\b', 'i')
   var eaExclude = /\bEA\d?\b/i

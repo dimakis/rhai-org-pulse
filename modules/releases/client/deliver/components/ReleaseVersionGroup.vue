@@ -163,7 +163,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import ProductReleaseCard from './ProductReleaseCard.vue'
-import { extractProduct } from '../composables/useReleaseFilter'
+import { extractProduct } from '../composables/release-utils'
 import { gammaSample } from '../utils/monteCarlo'
 
 const ITERATIONS = 1000

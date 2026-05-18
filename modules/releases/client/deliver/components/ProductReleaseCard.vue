@@ -281,7 +281,7 @@
 import { computed, ref } from 'vue'
 import MonteCarloChart from './MonteCarloChart.vue'
 import ComponentDetailRow from './ComponentDetailRow.vue'
-import { extractProduct } from '../composables/useReleaseFilter'
+import { extractProduct } from '../composables/release-utils'
 
 const FORECAST_WINDOW = 14
 const STRATEGIC_TYPES = new Set(['feature', 'initiative', 'spike'])

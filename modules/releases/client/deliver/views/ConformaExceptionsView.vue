@@ -12,26 +12,6 @@
         <span v-if="state.fetchedAt" class="text-xs text-gray-400 dark:text-gray-500">
           Updated {{ formatDateTime(state.fetchedAt) }}
         </span>
-        <div v-if="allReleases.length" class="flex items-center gap-2">
-          <label class="text-xs font-bold uppercase tracking-widest text-blue-600 dark:text-blue-400 whitespace-nowrap">
-            Release
-          </label>
-          <div class="relative">
-            <select
-              v-model="selectedVersion"
-              class="appearance-none pl-4 pr-10 py-2.5 text-sm font-semibold rounded-xl border-2 border-blue-500 dark:border-blue-400 bg-blue-50 dark:bg-blue-900/30 text-blue-900 dark:text-blue-100 focus:outline-none focus:ring-2 focus:ring-blue-400 shadow-sm cursor-pointer min-w-[230px]"
-            >
-              <option v-for="r in allReleases" :key="r.version" :value="r.version">
-                {{ r.version }} (GA: {{ r.gaDate }})
-              </option>
-            </select>
-            <div class="pointer-events-none absolute inset-y-0 right-3 flex items-center">
-              <svg class="w-4 h-4 text-blue-500 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7"/>
-              </svg>
-            </div>
-          </div>
-        </div>
       </div>
     </div>
 
@@ -45,7 +25,35 @@
       {{ state.error }}
     </div>
 
+    <!-- No conforma data matches current filter -->
+    <div v-else-if="!filteredConformaReleases.length" class="rounded-lg border border-gray-200 dark:border-gray-700 px-6 py-10 text-center">
+      <p class="text-sm text-gray-500 dark:text-gray-400">
+        No conforma data matches the current filter.
+      </p>
+    </div>
+
     <div v-else-if="selectedRelease" :key="selectedVersion" class="space-y-6">
+
+      <!-- Multi-release navigation (when filter matches more than one) -->
+      <div v-if="filteredConformaReleases.length > 1"
+           class="flex items-center justify-between rounded-lg bg-gray-50 dark:bg-gray-800/60
+                  border border-gray-200 dark:border-gray-700 px-4 py-2">
+        <button
+          :disabled="conformaIndex <= 0"
+          class="text-xs font-medium text-primary-600 dark:text-primary-400
+                 disabled:text-gray-300 dark:disabled:text-gray-600 disabled:cursor-not-allowed"
+          @click="conformaIndex--"
+        >Previous</button>
+        <span class="text-xs text-gray-500 dark:text-gray-400">
+          Showing {{ conformaIndex + 1 }} of {{ filteredConformaReleases.length }} matching releases
+        </span>
+        <button
+          :disabled="conformaIndex >= filteredConformaReleases.length - 1"
+          class="text-xs font-medium text-primary-600 dark:text-primary-400
+                 disabled:text-gray-300 dark:disabled:text-gray-600 disabled:cursor-not-allowed"
+          @click="conformaIndex++"
+        >Next</button>
+      </div>
 
       <!-- Version banner -->
       <div class="rounded-2xl bg-gradient-to-r from-blue-600 via-indigo-600 to-violet-600 dark:from-blue-700 dark:via-indigo-700 dark:to-violet-700 px-6 py-5 shadow-lg text-white">
@@ -340,7 +348,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch, inject } from 'vue'
 import { Bar, Doughnut, Line, Scatter } from 'vue-chartjs'
 import {
   Chart as ChartJS,
@@ -356,6 +364,7 @@ import {
 } from 'chart.js'
 
 import { useConformaExceptions } from '../composables/useConformaExceptions'
+import { extractProduct, extractVersion, normalizeVersionKey } from '../composables/release-utils'
 
 ChartJS.register(
   CategoryScale, LinearScale,
@@ -415,8 +424,9 @@ const TABLE_COLUMNS = [
 
 // ─── Data ───────────────────────────────────────────────────────────────────
 
+const filter = inject('releaseFilter')
+
 const state = useConformaExceptions()
-const selectedVersion = ref(null)
 const chartKey = ref(0)
 const todayStr = new Date().toLocaleDateString('sv-SE') // YYYY-MM-DD in local time
 
@@ -431,15 +441,35 @@ const allReleases = computed(() => {
   return nextUpcoming ? [nextUpcoming, ...shipped] : shipped
 })
 
-watch(allReleases, (list) => {
-  if (list.length && !selectedVersion.value) {
-    selectedVersion.value = list[0].version
-  }
-}, { immediate: true })
+const filteredConformaReleases = computed(() => {
+  const prods = filter.selectedProducts
+  const vers = filter.selectedVersions
+  const selVerKeys = vers.size
+    ? new Set([...vers].map(normalizeVersionKey))
+    : null
+  return allReleases.value.filter(r => {
+    const product = extractProduct(r.version)
+    const version = extractVersion(r.version)
+    if (prods.size && !prods.has(product)) return false
+    if (selVerKeys && !selVerKeys.has(normalizeVersionKey(version))) return false
+    return true
+  })
+})
 
+// Index for prev/next navigation when multiple releases match
+const conformaIndex = ref(0)
+
+// Reset index when filtered list changes
+watch(filteredConformaReleases, () => {
+  conformaIndex.value = 0
+})
+
+// The single release currently being displayed
 const selectedRelease = computed(() =>
-  allReleases.value.find(r => r.version === selectedVersion.value) || null
+  filteredConformaReleases.value[conformaIndex.value] || null
 )
+
+const selectedVersion = computed(() => selectedRelease.value?.version || null)
 
 // ─── Category extraction ─────────────────────────────────────────────────────
 

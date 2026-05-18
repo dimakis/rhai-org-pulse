@@ -17,133 +17,155 @@
     </div>
 
     <div
-      v-if="refreshing && analysis"
-      class="flex items-center gap-2 rounded-lg border border-indigo-200 dark:border-indigo-700/50 bg-indigo-50/60 dark:bg-indigo-900/20 px-4 py-2.5 text-sm text-indigo-700 dark:text-indigo-300"
-    >
-      <svg class="animate-spin h-4 w-4 shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
-        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-      </svg>
-      Updating data in the background — you can keep working with the current data.
-    </div>
-
-    <div v-if="error" class="rounded-lg border border-red-300 bg-red-50 text-red-700 px-4 py-3 text-sm">
-      {{ error }}
-    </div>
-
-    <div v-if="(loading || refreshing) && !analysis" class="text-sm text-gray-500 dark:text-gray-400">Loading release analytics...</div>
-
-    <template v-if="analysis">
-      <div
-        v-if="analysis.warning"
-        class="rounded-lg border border-yellow-300 bg-yellow-50 text-yellow-800 px-4 py-3 text-sm"
+        v-if="refreshing && analysis"
+        class="flex items-center gap-2 rounded-lg border border-indigo-200 dark:border-indigo-700/50 bg-indigo-50/60 dark:bg-indigo-900/20 px-4 py-2.5 text-sm text-indigo-700 dark:text-indigo-300"
       >
-        {{ analysis.warning }}
+        <svg class="animate-spin h-4 w-4 shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+        </svg>
+        Updating data in the background — you can keep working with the current data.
       </div>
 
-      <div class="text-xs text-gray-500 dark:text-gray-400 space-y-1">
-        <p>
-          Generated: {{ formatDateTime(analysis.generatedAt) }} |
-          Baseline window: {{ analysis.baselineDays }}d |
-          Capacity mode: {{ (analysis.capacityMode || '').toUpperCase() }}
-        </p>
+      <div v-if="error" class="rounded-lg border border-red-300 bg-red-50 text-red-700 px-4 py-3 text-sm">
+        {{ error }}
       </div>
 
-      <section class="space-y-6">
-        <div>
-          <h3 class="text-sm font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wide">
-            Releases
-          </h3>
-          <p class="text-xs text-gray-500 dark:text-gray-400 leading-relaxed mt-2 max-w-3xl">
-            {{ riskLegendText }}
+      <div v-if="(loading || refreshing) && !analysis" class="text-sm text-gray-500 dark:text-gray-400">Loading release analytics...</div>
+
+      <template v-if="analysis">
+        <div
+          v-if="analysis.warning"
+          class="rounded-lg border border-yellow-300 bg-yellow-50 text-yellow-800 px-4 py-3 text-sm"
+        >
+          {{ analysis.warning }}
+        </div>
+
+        <div class="text-xs text-gray-500 dark:text-gray-400 space-y-1">
+          <p>
+            Generated: {{ formatDateTime(analysis.generatedAt) }} |
+            Baseline window: {{ analysis.baselineDays }}d |
+            Capacity mode: {{ (analysis.capacityMode || '').toUpperCase() }}
           </p>
-          <ReleaseFilterBar
-            class="mt-4"
-            :selected-versions="selectedVersions"
-            :visible-versions="visibleVersions"
-            :selected-projects="selectedProjects"
-            :visible-projects="visibleProjects"
-            :filtered-count="filteredReleases.length"
-            :total-count="allReleases.length"
-            :toggle-version="toggleVersion"
-            :clear-versions="clearVersions"
-            :toggle-project="toggleProject"
-            :clear-projects="clearProjects"
-            :reset-filters="resetAllFilters"
-          />
         </div>
 
-        <div v-if="!filteredReleases.length" class="text-sm text-gray-500 dark:text-gray-400">
-          No releases match the current filters.
-        </div>
-
-        <template v-else>
-          <div class="space-y-5">
-            <ReleaseVersionGroup
-              v-for="group in groupedByVersion"
-              :key="group.version"
-              :group="group"
-              :mc-inputs-map="mcInputsMap"
-              :get-mc-target="getMcTarget"
-              :component-velocity="analysis?.componentVelocity || {}"
-              :component-global-workload="analysis?.componentGlobalWorkload || {}"
-              :selected-projects="selectedProjects"
-              :default-open="false"
-              @set-mc-target="setMcTarget"
-            />
+        <section class="space-y-6">
+          <div>
+            <h3 class="text-sm font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wide">
+              Releases
+            </h3>
+            <p class="text-xs text-gray-500 dark:text-gray-400 leading-relaxed mt-2 max-w-3xl">
+              {{ riskLegendText }}
+            </p>
           </div>
-        </template>
-      </section>
-    </template>
+
+          <div v-if="!allReleases.length" class="text-sm text-gray-500 dark:text-gray-400">
+            No analysis data for this release.
+          </div>
+
+          <template v-else>
+            <div class="space-y-5">
+              <ReleaseVersionGroup
+                v-for="group in groupedByVersion"
+                :key="group.version"
+                :group="group"
+                :mc-inputs-map="mcInputsMap"
+                :get-mc-target="getMcTarget"
+                :component-velocity="analysis?.componentVelocity || {}"
+                :component-global-workload="analysis?.componentGlobalWorkload || {}"
+                :default-open="false"
+                @set-mc-target="setMcTarget"
+              />
+            </div>
+          </template>
+        </section>
+      </template>
   </div>
 </template>
 
 <script setup>
-import { computed, reactive } from 'vue'
-import { useReleaseAnalysis } from '../composables/useReleaseAnalysis'
-import { useReleaseFilter } from '../composables/useReleaseFilter'
-import ReleaseFilterBar from '../components/ReleaseFilterBar.vue'
+import { computed, reactive, inject } from 'vue'
+import { extractVersion, normalizeVersionKey } from '../composables/release-utils'
 import ReleaseVersionGroup from '../components/ReleaseVersionGroup.vue'
 
-const { loading, refreshing, error, analysis, refreshAnalysis } = useReleaseAnalysis()
+const filter = inject('releaseFilter')
+const analysisState = inject('analysisState')
+const { loading, refreshing, error, analysis, refreshAnalysis } = analysisState
 
-const allReleases = computed(() => analysis.value?.releases || [])
+const allReleases = computed(() => filter.filteredReleases.value)
 
-const {
-  selectedVersions,
-  visibleVersions,
-  filteredReleases,
-  groupedByVersion,
-  toggleVersion,
-  clearVersions,
-  resetFilters
-} = useReleaseFilter(allReleases)
-
-// ── Jira project key filter ──
-
-const selectedProjects = reactive(new Set())
-
-const visibleProjects = computed(() => {
-  const keys = new Set()
-  for (const r of filteredReleases.value) {
-    if (r.teams) {
-      for (const pk of Object.keys(r.teams)) keys.add(pk)
+const groupedByVersion = computed(() => {
+  const map = new Map()
+  const displayVersion = new Map()
+  for (const r of allReleases.value) {
+    const rawVer = extractVersion(r.releaseNumber)
+    const groupKey = normalizeVersionKey(rawVer)
+    if (!map.has(groupKey)) {
+      map.set(groupKey, [])
+      displayVersion.set(groupKey, rawVer)
     }
+    map.get(groupKey).push(r)
   }
-  return [...keys].sort()
+
+  const groups = []
+  for (const [groupKey, releases] of map) {
+    const version = displayVersion.get(groupKey)
+    const earliest = releases.reduce((min, r) => {
+      const d = new Date(r.dueDate)
+      return d < min ? d : min
+    }, new Date('9999-12-31'))
+
+    const cfDates = releases.map(r => r.codeFreezeDate).filter(Boolean)
+    const earliestCodeFreeze = cfDates.length
+      ? cfDates.reduce((min, d) => (new Date(d) < new Date(min) ? d : min))
+      : null
+
+    const dueDates = releases.map(r => r.dueDate).filter(Boolean)
+    const earliestRelease = dueDates.length
+      ? dueDates.reduce((min, d) => (new Date(d) < new Date(min) ? d : min))
+      : null
+
+    const products = [...new Set(releases.map(r => {
+      const s = (r.releaseNumber || '').toLowerCase()
+      const dash = s.indexOf('-')
+      return dash > 0 ? s.slice(0, dash) : s
+    }))]
+
+    let risk = 'green'
+    if (releases.some(r => r.risk === 'red')) risk = 'red'
+    else if (releases.some(r => r.risk === 'yellow')) risk = 'yellow'
+
+    const totals = { to_do: 0, doing: 0, done: 0, remaining: 0, total: 0, issues: 0, issues_to_do: 0, issues_doing: 0, issues_done: 0 }
+    for (const r of releases) {
+      const t = r.totals || {}
+      totals.to_do += t.to_do || 0
+      totals.doing += t.doing || 0
+      totals.done += t.done || 0
+      totals.remaining += t.remaining || 0
+      totals.total += t.total || 0
+      totals.issues += t.issues || 0
+      totals.issues_to_do += t.issues_to_do || 0
+      totals.issues_doing += t.issues_doing || 0
+      totals.issues_done += t.issues_done || 0
+    }
+
+    groups.push({
+      version,
+      releases,
+      risk,
+      totals,
+      earliestDue: earliest,
+      earliestCodeFreeze,
+      earliestRelease,
+      productCount: products.length,
+      productNames: products,
+      releaseCount: releases.length
+    })
+  }
+
+  groups.sort((a, b) => a.version.localeCompare(b.version, undefined, { numeric: true }))
+  return groups
 })
-
-function toggleProject(pk) {
-  if (selectedProjects.has(pk)) selectedProjects.delete(pk)
-  else selectedProjects.add(pk)
-}
-
-function clearProjects() { selectedProjects.clear() }
-
-function resetAllFilters() {
-  resetFilters()
-  selectedProjects.clear()
-}
 
 // ── Monte Carlo state ──
 
@@ -212,7 +234,7 @@ function releaseIssues(release) {
 
 const mcInputsMap = computed(() => {
   const map = new Map()
-  for (const r of filteredReleases.value) {
+  for (const r of allReleases.value) {
     const inputs = getMonteCarloInputs(r)
     if (inputs) map.set(r.releaseNumber, inputs)
   }

@@ -408,7 +408,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onBeforeUpdate, nextTick } from 'vue'
 import { apiRequest } from '@shared/client/services/api.js'
 import { useAuth } from '@shared/client/composables/useAuth.js'
 
@@ -429,6 +429,8 @@ const saving = ref(false)
 const editingId = ref(null)
 const createIdError = ref('')
 const cardRefs = ref({})
+
+onBeforeUpdate(() => { cardRefs.value = {} })
 
 const ID_PATTERN = /^[a-z0-9][a-z0-9._-]*$/
 

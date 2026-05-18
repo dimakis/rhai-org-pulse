@@ -16,6 +16,8 @@
       </button>
     </div>
 
+    <template>
+
     <div
       v-if="refreshing && analysis"
       class="flex items-center gap-2 rounded-lg border border-indigo-200 dark:border-indigo-700/50 bg-indigo-50/60 dark:bg-indigo-900/20 px-4 py-2.5 text-sm text-indigo-700 dark:text-indigo-300"
@@ -49,18 +51,8 @@
         </p>
       </div>
 
-      <ReleaseFilterBar
-        :selected-versions="selectedVersions"
-        :visible-versions="visibleVersions"
-        :filtered-count="enrichedReleases.length"
-        :total-count="allReleases.length"
-        :toggle-version="toggleVersion"
-        :clear-versions="clearVersions"
-        :reset-filters="resetFilters"
-      />
-
       <div v-if="!enrichedReleases.length" class="text-sm text-gray-500 dark:text-gray-400">
-        No releases match the current filters.
+        No analysis data for this release.
       </div>
 
       <article
@@ -367,14 +359,13 @@
       </article>
 
     </template>
+
+    </template>
   </div>
 </template>
 
 <script setup>
-import { computed, reactive } from 'vue'
-import { useReleaseAnalysis } from '../composables/useReleaseAnalysis'
-import { useReleaseFilter } from '../composables/useReleaseFilter'
-import ReleaseFilterBar from '../components/ReleaseFilterBar.vue'
+import { computed, reactive, inject } from 'vue'
 import IssueCountChart from '../components/IssueCountChart.vue'
 import VelocityChart from '../components/VelocityChart.vue'
 import BacklogHealthChart from '../components/BacklogHealthChart.vue'
@@ -385,23 +376,16 @@ const expandedProjects = reactive(new Set())
 const expandedComponents = reactive(new Set())
 const expandedStrategic = reactive(new Set())
 
-const { loading, refreshing, error, analysis, refreshAnalysis } = useReleaseAnalysis()
+const filter = inject('releaseFilter')
+const analysisState = inject('analysisState')
+const { loading, refreshing, error, analysis, refreshAnalysis } = analysisState
 
 function normalizeType(t) { return (t || '').toLowerCase().trim() }
 
-const allReleases = computed(() => analysis.value?.releases || [])
-
-const {
-  selectedVersions,
-  visibleVersions,
-  filteredReleases,
-  toggleVersion,
-  clearVersions,
-  resetFilters
-} = useReleaseFilter(allReleases)
+const allReleases = computed(() => filter.filteredReleases.value)
 
 const enrichedReleases = computed(() =>
-  filteredReleases.value.map(r => ({
+  allReleases.value.map(r => ({
     ...r,
     projectGroups: buildProjectGroups(r)
   }))

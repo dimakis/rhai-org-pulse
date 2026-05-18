@@ -1,5 +1,6 @@
 import { ref } from 'vue'
 import { apiRequest, getApiBase } from '@shared/client/services/api'
+import { impersonatingUid } from '@shared/client/state/impersonation'
 
 const API_BASE = '/modules/releases/planning'
 
@@ -27,6 +28,9 @@ export function useReleasePlanning() {
     const headers = {}
     if (etagCache[cacheKey]) {
       headers['If-None-Match'] = etagCache[cacheKey]
+    }
+    if (impersonatingUid.value) {
+      headers['X-Impersonate-Uid'] = impersonatingUid.value
     }
 
     try {

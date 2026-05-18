@@ -1,14 +1,15 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import { apiRequest, SESSION_CACHE_PREFIX } from '@shared/client/services/api'
 
-const ANALYSIS_CACHE_KEY = `${SESSION_CACHE_PREFIX}release-analysis:analysis-v6`
 const POLL_INTERVAL_MS = 3000
 const MAX_POLL_MS = 5 * 60 * 1000
+
+const CACHE_KEY = `${SESSION_CACHE_PREFIX}release-analysis:v8`
 
 function readCache() {
   if (typeof sessionStorage === 'undefined') return null
   try {
-    const raw = sessionStorage.getItem(ANALYSIS_CACHE_KEY)
+    const raw = sessionStorage.getItem(CACHE_KEY)
     if (!raw) return null
     const data = JSON.parse(raw)
     if (!data || typeof data !== 'object' || !Array.isArray(data.releases)) return null
@@ -21,7 +22,7 @@ function readCache() {
 function writeCache(data) {
   if (typeof sessionStorage === 'undefined' || !data) return
   try {
-    sessionStorage.setItem(ANALYSIS_CACHE_KEY, JSON.stringify(data))
+    sessionStorage.setItem(CACHE_KEY, JSON.stringify(data))
   } catch {
     // quota or private mode — ignore
   }
@@ -30,7 +31,7 @@ function writeCache(data) {
 function clearCache() {
   if (typeof sessionStorage === 'undefined') return
   try {
-    sessionStorage.removeItem(ANALYSIS_CACHE_KEY)
+    sessionStorage.removeItem(CACHE_KEY)
   } catch {
     // noop
   }
@@ -143,6 +144,19 @@ export function useReleaseAnalysis({ onLoaded } = {}) {
   }
 
   onMounted(() => {
+    // Clean up old v6 cache key
+    const OLD_KEY = `${SESSION_CACHE_PREFIX}release-analysis:analysis-v6`
+    try { sessionStorage.removeItem(OLD_KEY) } catch { /* noop */ }
+
+    // Clean up old per-release v7 cache keys
+    const V7_PREFIX = `${SESSION_CACHE_PREFIX}release-analysis:v7:`
+    try {
+      for (let i = sessionStorage.length - 1; i >= 0; i--) {
+        const key = sessionStorage.key(i)
+        if (key?.startsWith(V7_PREFIX)) sessionStorage.removeItem(key)
+      }
+    } catch { /* noop */ }
+
     const cached = readCache()
     if (cached) {
       analysis.value = cached

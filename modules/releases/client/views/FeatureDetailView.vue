@@ -33,7 +33,10 @@ function renderAdf(node) {
         else if (mark.type === 'underline') html = `<u>${html}</u>`
         else if (mark.type === 'code') html = `<code class="px-1 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-xs font-mono">${html}</code>`
         else if (mark.type === 'link' && mark.attrs?.href && isSafeUrl(mark.attrs.href)) html = `<a href="${escAttr(mark.attrs.href)}" target="_blank" class="text-primary-600 dark:text-blue-400 hover:underline">${html}</a>`
-        else if (mark.type === 'textColor') html = `<span style="color:${escAttr(mark.attrs?.color || '')}">${html}</span>`
+        else if (mark.type === 'textColor') {
+          const c = (mark.attrs?.color || '').replace(/[^a-zA-Z0-9#(),.\s%]/g, '')
+          html = `<span style="color:${escAttr(c)}">${html}</span>`
+        }
       }
     }
     return html

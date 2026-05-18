@@ -87,7 +87,7 @@ function createRoleStore(readFromStorage, writeToStorage, options = {}) {
     if (!isSafeKey(normalized)) throw new Error('Invalid email');
     const data = readRoles();
 
-    if (!data.assignments[normalized]) {
+    if (!Object.hasOwn(data.assignments, normalized)) {
       data.assignments[normalized] = {
         roles: [],
         assignedBy: actor,
@@ -127,7 +127,7 @@ function createRoleStore(readFromStorage, writeToStorage, options = {}) {
     const normalized = normalizeEmail(email, authDomain);
     if (!isSafeKey(normalized)) throw new Error('Invalid email');
     const data = readRoles();
-    const entry = data.assignments[normalized];
+    const entry = Object.hasOwn(data.assignments, normalized) ? data.assignments[normalized] : null;
 
     if (!entry || !entry.roles.includes(role)) {
       throw new Error(`User ${normalized} does not have role "${role}"`);
