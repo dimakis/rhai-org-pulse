@@ -1,5 +1,6 @@
 const VALID_COMPLETION_STATUSES = ['completed', 'in-progress'];
 const VALID_PRODUCT_CONTEXTS = ['RHOAI', 'ODH'];
+const VALID_ONBOARDING_METHODS = ['automated', 'manual'];
 const VALID_KEY_PREFIXES = ['RHOAIENG-'];
 
 // Pipeline step keys in execution order (per onboarding skill doc)
@@ -130,6 +131,11 @@ function validateComponentOnboarding(body) {
     errors.push('created must be a valid ISO 8601 date string');
   }
 
+  // resolution: optional string or null (e.g. "Done", "Won't Do", "Duplicate")
+  if (body.resolution !== undefined && body.resolution !== null && typeof body.resolution !== 'string') {
+    errors.push('resolution must be a string or null');
+  }
+
   // resolved: optional ISO 8601 or null
   if (body.resolved !== undefined && body.resolved !== null) {
     if (typeof body.resolved !== 'string' || isNaN(Date.parse(body.resolved))) {
@@ -141,6 +147,18 @@ function validateComponentOnboarding(body) {
   if (body.validationDate !== undefined && body.validationDate !== null) {
     if (typeof body.validationDate !== 'string' || isNaN(Date.parse(body.validationDate))) {
       errors.push('validationDate must be a valid ISO 8601 date string or null');
+    }
+  }
+
+  // onboardingMethod: optional enum (automated/manual), defaults to "automated"
+  if (body.onboardingMethod !== undefined && !VALID_ONBOARDING_METHODS.includes(body.onboardingMethod)) {
+    errors.push(`onboardingMethod must be one of: ${VALID_ONBOARDING_METHODS.join(', ')}`);
+  }
+
+  // firstCommentDate: optional ISO 8601 or null
+  if (body.firstCommentDate !== undefined && body.firstCommentDate !== null) {
+    if (typeof body.firstCommentDate !== 'string' || isNaN(Date.parse(body.firstCommentDate))) {
+      errors.push('firstCommentDate must be a valid ISO 8601 date string or null');
     }
   }
 
@@ -167,10 +185,13 @@ function validateComponentOnboarding(body) {
       labels: body.labels || [],
       onboardingSteps: body.onboardingSteps || {},
       created: body.created || null,
+      resolution: body.resolution || null,
       resolved: body.resolved || null,
-      validationDate: body.validationDate || null
+      validationDate: body.validationDate || null,
+      onboardingMethod: body.onboardingMethod || 'automated',
+      firstCommentDate: body.firstCommentDate || null
     }
   };
 }
 
-module.exports = { validateComponentOnboarding, VALID_COMPLETION_STATUSES, VALID_PRODUCT_CONTEXTS, ONBOARDING_STEP_KEYS };
+module.exports = { validateComponentOnboarding, VALID_COMPLETION_STATUSES, VALID_PRODUCT_CONTEXTS, VALID_ONBOARDING_METHODS, ONBOARDING_STEP_KEYS };
