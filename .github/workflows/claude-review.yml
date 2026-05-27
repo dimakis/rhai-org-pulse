@@ -307,6 +307,7 @@ jobs:
         continue-on-error: true
         with:
           use_vertex: "true"
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           track_progress: true
           display_report: "true"
           allowed_bots: "claude"
