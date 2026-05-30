@@ -295,11 +295,16 @@ All routes prefixed with `/api`. Authenticated via OAuth proxy in production.
 - `/api/modules/releases/delivery/quality/bugs` — cumulative bug data for selected versions
 - `/api/modules/releases/delivery/quality/components` — components with bug counts
 - `/api/modules/releases/delivery/quality/debug` — debug diagnostics for bug count issues (admin)
+- `/api/modules/releases/delivery/commitment/:version/:phase` — commitment tracking data for a release phase
 - `/api/modules/releases/hygiene/features` — hygiene features for a version
 - `/api/modules/releases/hygiene/summary` — aggregate violation summary for a version
 - `/api/modules/releases/hygiene/refresh/status` — current hygiene refresh state
 - `/api/modules/releases/hygiene/config` — hygiene rule configuration (release-manager)
 - `/api/modules/releases/hygiene/program-report` — cross-version aggregate hygiene report
+- `/api/modules/releases/tv-fv-delta` — TV/FV delta analysis with stale-while-revalidate (auth)
+- `/api/modules/releases/tv-fv-delta/refresh/status` — TV/FV delta refresh status (auth)
+- `/api/modules/releases/tv-fv-delta/releases` — get configured releases from Smartsheet via planning module (auth)
+- `/api/modules/releases/tv-fv-delta/versions` — all Jira project fix versions with release dates (auth)
 - `/api/modules/ai-impact/assessments` — all assessments
 - `/api/modules/ai-impact/assessments/:key` — single assessment + history
 - `/api/modules/ai-impact/assessments/status` — assessment status (admin)
@@ -313,6 +318,7 @@ All routes prefixed with `/api`. Authenticated via OAuth proxy in production.
 - `/api/modules/ai-impact/component-onboarding` — all component onboarding entries (latest projection)
 - `/api/modules/ai-impact/component-onboarding/:key` — single component onboarding entry + history
 - `/api/modules/ai-impact/component-onboarding/status` — component onboarding data status (admin)
+- `/api/modules/ai-impact/doc-mr-kpi-data` — MR quality KPI data fetched directly from GitLab
 - `/api/modules/product-builds/config` — AIPCC Dashboard API configuration (admin)
 - `/api/modules/product-builds/health` — AIPCC Dashboard API connectivity check
 - `/api/modules/product-builds/products/:key` — product details (proxied)
@@ -403,6 +409,7 @@ All routes prefixed with `/api`. Authenticated via OAuth proxy in production.
 - `/api/modules/releases/delivery/quality/refresh` — refresh quality data from Jira (admin)
 - `/api/modules/releases/hygiene/refresh` — trigger hygiene data refresh (release-manager)
 - `/api/modules/releases/hygiene/refresh-all` — refresh hygiene data for all stored versions (release-manager)
+- `/api/modules/releases/tv-fv-delta/refresh` — trigger TV/FV delta refresh (auth)
 - `/api/modules/releases/hygiene/config` — save hygiene rule configuration (release-manager)
 - `/api/modules/ai-impact/assessments/bulk` — bulk upsert assessments (admin)
 - `/api/modules/ai-impact/features/bulk` — bulk upsert features (admin)

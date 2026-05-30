@@ -12,6 +12,7 @@ const registerPlanningRoutes = require('./planning/routes');
 const registerExecutionRoutes = require('./execution/routes');
 const registerDeliveryRoutes = require('./delivery/routes');
 const registerHygieneRoutes = require('./hygiene/routes');
+const registerTvFvDeltaRoutes = require('./tv-fv-delta/routes');
 const { getAuditLog } = require('./planning/audit-log');
 
 /**
@@ -171,6 +172,16 @@ module.exports = function registerRoutes(router, context) {
   });
   router.use('/hygiene', hygieneRouter);
 
+  // TV/FV Delta sub-router (mounted at /api/modules/releases/tv-fv-delta/)
+  const tvFvDeltaRouter = express.Router();
+  registerTvFvDeltaRoutes(tvFvDeltaRouter, {
+    storage,
+    requireAuth,
+    requireScope,
+    registerDiagnostics: context.registerDiagnostics || null
+  });
+  router.use('/tv-fv-delta', tvFvDeltaRouter);
+
   // ─── Unified Audit Routes ───
 
   /**
@@ -300,4 +311,10 @@ module.exports = function registerRoutes(router, context) {
 
     res.json({ status: 'completed', ...results });
   });
+
+  // ─── Export Hook ───
+
+  if (context.registerExport) {
+    context.registerExport(require('./export'));
+  }
 };

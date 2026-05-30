@@ -1243,6 +1243,10 @@ app.get('/api/modules', function(req, res) {
 
 const diagnosticsRegistry = {};
 const messageRegistry = require('../shared/server/message-registry');
+const { createRefreshRegistry } = require('../shared/server/refresh-registry');
+const { createExportRegistry } = require('../shared/server/export-registry');
+const refreshRegistry = createRefreshRegistry();
+const exportRegistry = createExportRegistry();
 
 // Register backup staleness message provider (admin-only warning when latest backup > 48h old)
 const BACKUP_STALE_HOURS = 48;
@@ -1277,7 +1281,8 @@ messageRegistry.registerProvider('backup-staleness', async function(userContext)
     return [];
   }
 });
-const moduleContext = { storage: storageModule, requireAuth: authMiddleware, requireAdmin, requireTeamAdmin, requireReleaseManager, requireScope, roleStore, registerDiagnostics: null };
+const coreServices = { storage: storageModule, requireAuth: authMiddleware, requireAdmin, requireTeamAdmin, requireReleaseManager, requireScope, roleStore };
+const registries = { diagnostics: diagnosticsRegistry, messages: messageRegistry, refresh: refreshRegistry, exports: exportRegistry };
 
 const persistedState = loadModuleState(storageModule);
 // Persist defaults for any newly discovered modules at startup (not in GET handlers).
@@ -1296,7 +1301,7 @@ const effectiveState = getEffectiveState(builtInModules, startupState);
 reconcileStartupState(builtInModules, effectiveState, storageModule);
 const enabledSlugs = new Set(Object.entries(effectiveState).filter(([, v]) => v).map(([k]) => k));
 
-const moduleRouters = createModuleRouters(builtInModules, moduleContext, enabledSlugs, diagnosticsRegistry, messageRegistry);
+const moduleRouters = createModuleRouters(builtInModules, coreServices, enabledSlugs, registries);
 
 const ttRouter = moduleRouters['team-tracker'];
 if (ttRouter && enabledSlugs.has('team-tracker')) {
@@ -1336,7 +1341,7 @@ mountModuleRouters(app, builtInModules, moduleRouters);
 
 // ─── Health Metrics (core feature, not a module) ───
 const { createHealthMetricsRouter } = require('./health-metrics/routes');
-app.use('/api/health-metrics', createHealthMetricsRouter(moduleContext));
+app.use('/api/health-metrics', createHealthMetricsRouter(coreServices));
 
 /**
  * @openapi
@@ -1692,9 +1697,20 @@ const EXPORT_RATE_MAX = 5;
 const EXPORT_RATE_WINDOW_MS = 10 * 60_000;
 const exportRateCounts = new Map();
 
+// Periodic cleanup of expired rate limit entries (every 60s)
+setInterval(function() {
+  const now = Date.now();
+  for (const [key, value] of exportRateCounts.entries()) {
+    if (now - value.windowStart >= EXPORT_RATE_WINDOW_MS) {
+      exportRateCounts.delete(key);
+    }
+  }
+}, 60_000).unref();
+
 function exportRateLimit(req, res, next) {
   const email = req.userEmail;
   const now = Date.now();
+
   const entry = exportRateCounts.get(email);
   if (!entry || now - entry.windowStart >= EXPORT_RATE_WINDOW_MS) {
     exportRateCounts.set(email, { windowStart: now, count: 1 });
@@ -1727,7 +1743,7 @@ function exportRateLimit(req, res, next) {
  *         $ref: '#/components/responses/ServerError'
  */
 app.get('/api/export/test-data', requireAdmin, requireScope('admin:manage'), exportRateLimit, function(req, res) {
-  handleExport(req, res, storageModule, builtInModules);
+  handleExport(req, res, storageModule, exportRegistry);
 });
 
 // ─── Must-Gather: Diagnostic data download ───
