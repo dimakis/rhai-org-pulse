@@ -70,6 +70,33 @@ modules/your-module/
 | `client.settingsComponent` | No | Vue component for the Settings page |
 | `server.entry` | No | Path to backend entry point |
 
+### navItem Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `id` | string | Yes | Unique within module, maps to a key in the `routes` export |
+| `label` | string | Yes | Sidebar display text |
+| `icon` | string | Yes | Lucide icon name |
+| `default` | boolean | No | If `true`, this is the module's landing view |
+| `disabled` | boolean | No | If `true`, item is visible but non-clickable (greyed out) |
+| `requireRole` | string | No | Only show item to users with this role (e.g., `"manager"`, `"team-admin"`, `"release-manager"`) |
+| `requireCondition` | string | No | Only show when condition is met (e.g., `"in-app-mode"` — hides when roster is sheet-based) |
+| `separatorBefore` | boolean | No | Render a visual separator line above this item |
+
+### `hiddenRoutes`
+
+In `client`, you can declare `hiddenRoutes` — a map of route IDs to their parent navItem ID. These are routes that exist in the `routes` export but should not appear as sidebar items (e.g., detail views navigated to programmatically):
+
+```json
+{
+  "client": {
+    "hiddenRoutes": {
+      "feature-detail": "execute"
+    }
+  }
+}
+```
+
 ### navItems vs routes
 
 - **`navItems`** defines what appears in the sidebar. Each has `id`, `label`, `icon`, and optionally `default: true`.
@@ -128,9 +155,31 @@ crossNavigate('releases', 'feature-detail', { key: 'RHAISTRAT-123' })
 
 This produces a hash URL like `#/releases/feature-detail?key=RHAISTRAT-123` and updates `window.location.hash`. Use intra-module `moduleNav.navigateTo()` for navigation within your own module.
 
+**Important:** Cross-module links should always be guarded by a module-availability
+check so the UI degrades gracefully when the target module is not installed:
+
+```vue
+<script setup>
+import { inject, computed } from 'vue'
+import { useModuleLink } from '@shared/client/composables/useModuleLink.js'
+
+const moduleNav = inject('moduleNav')
+const targetAvailable = computed(() => moduleNav?.isModuleAvailable?.('other-module') ?? false)
+const { linkTo } = useModuleLink()
+</script>
+<template>
+  <a v-if="targetAvailable" :href="linkTo('other-module', 'view', { id: '123' })">View</a>
+  <span v-else>View</span>
+</template>
+```
+
 ## Backend Entry (`server/index.js`)
 
 ```javascript
+/**
+ * @param {import('express').Router} router
+ * @param {import('@shared/server/module-context').ModuleContext} context
+ */
 module.exports = function registerRoutes(router, context) {
   const { storage, requireAuth, requireAdmin } = context
 
@@ -148,6 +197,40 @@ module.exports = function registerRoutes(router, context) {
 
 Routes are automatically mounted at `/api/modules/<slug>/`.
 
+## Server Context Reference
+
+The authoritative typedef for the context object is in `shared/server/module-context.js`. Each module receives a frozen, per-module context built by `buildModuleContext()`.
+
+### Context Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `storage` | object | Storage module (`readFromStorage`, `writeToStorage`, etc.) |
+| `requireAuth` | middleware | Requires authenticated user |
+| `requireAdmin` | middleware | Requires admin role |
+| `requireTeamAdmin` | middleware | Requires team-admin or admin role |
+| `requireRole(role)` | function | Returns middleware requiring a specific role (admins always pass) |
+| `requireScope(name)` | function | Returns middleware for API token scope check |
+| `roleStore` | object | Role store instance |
+| `registerRole(id, config)` | function | Register a module-specific role (e.g., `release-manager`) |
+| `registerScopes(configs)` | function | Register module-specific API token scopes |
+| `registerDiagnostics(fn)` | function | Register diagnostics hook (see below) |
+| `registerMessageProvider(id, fn)` | function | Register message provider (see below) |
+| `registerRefresh(id, config)` | function | Register refresh handler (see below) |
+| `registerExport(fn)` | function | Register data export hook (see below) |
+| `secrets` | object | Frozen object containing resolved secret values declared by this module |
+| `resolveSecret(name)` | function | Read a dynamic secret from `process.env` at call time |
+| `registerSecretValidator(key, fn)` | function | Register a connectivity validator for a secret key |
+
+### Testing
+
+Use `createTestContext(overrides)` from `shared/server/module-context.js` to create a mock context for unit tests:
+
+```javascript
+const { createTestContext } = require('../../shared/server/module-context')
+const context = createTestContext({ storage: myMockStorage })
+```
+
 ## Shared Imports
 
 Modules can import shared composables and utilities:
@@ -158,7 +241,11 @@ import { useAuth } from '@shared/client/composables/useAuth'
 import { apiRequest, cachedRequest } from '@shared/client/services/api'
 ```
 
-**Modules cannot import from other modules** — only from `@shared`.
+**Modules cannot import from other modules** — only from `@shared`. This is enforced
+by the `org-pulse/no-cross-module-imports` ESLint rule, which flags direct imports,
+cross-module API paths (`/api/modules/<other>/...`), and cross-module hash routes
+(`#/<other>/...`). If a cross-module reference is unavoidable, guard it behind a
+module-availability check and add an `eslint-disable` comment with justification.
 
 ## Settings Component
 
@@ -176,10 +263,12 @@ The component will be rendered as a tab in the shell's Settings page.
 
 ## Testing
 
+- **Unit tests**: Use Vitest with @vue/test-utils for frontend, Vitest for backend
 - Frontend tests: `modules/your-module/__tests__/client/`
 - Backend tests: `modules/your-module/__tests__/server/` or `modules/your-module/server/__tests__/`
 - Run all tests: `npm test`
 - Module manifest validation: `npm run validate:modules`
+- **Integration tests**: Playwright tests in `tests/integration/` validate module UI (see CONTRIBUTING.md)
 
 ## CODEOWNERS
 
@@ -224,14 +313,13 @@ The daily CronJob (`deploy/openshift/overlays/prod/cronjob-sync-refresh.yaml`) c
 
 ## Export Hook
 
-Modules can participate in the anonymized test data export by declaring an `export` field in `module.json` and providing a custom export handler.
+Modules can participate in the anonymized test data export by registering an export hook via `context.registerExport(fn)` and optionally declaring exported files in `module.json`.
 
-### module.json
+### module.json (optional)
 
 ```json
 {
   "export": {
-    "customHandler": true,
     "files": [
       { "path": "my-data.json", "notes": "Description of data" }
     ]
@@ -239,7 +327,19 @@ Modules can participate in the anonymized test data export by declaring an `expo
 }
 ```
 
-When `customHandler` is `true`, the orchestrator calls `server/export.js` during export. The `files` array is documentation-only when `customHandler` is `true`.
+The `files` array is documentation-only — it describes what the export hook produces. The actual export logic lives in the registered hook.
+
+### Registering an Export Hook
+
+In your `server/index.js`, register the export function:
+
+```javascript
+module.exports = function registerRoutes(router, context) {
+  // ... routes ...
+
+  context.registerExport(require('./export'))
+}
+```
 
 ### server/export.js
 
@@ -263,8 +363,6 @@ module.exports = async function(addFile, storage, mapping) {
 - `addFile(path, jsonData)` — adds a file to the tarball (path relative to `data/` root)
 - `storage` — shared storage layer (`readFromStorage`, `writeToStorage`, `listStorageFiles`)
 - `mapping` — universal PII mapping from `shared/server/anonymize.js` with functions like `getOrCreateNameMapping()`, `anonymizeJiraKey()`, `anonymizeIssueSummary()`, etc.
-
-The validation script (`npm run validate:modules`) checks that `server/export.js` exists when `customHandler` is `true`.
 
 ## Diagnostics Hook
 
@@ -302,11 +400,12 @@ module.exports = function registerRoutes(router, context) {
 - **Include data integrity checks**: Missing files, stale caches, configuration mismatches
 - **Keep it fast**: The hook has a 10-second timeout. Avoid expensive operations
 - **No PII in keys**: Put PII in values only — the must-gather redaction system anonymizes values but not the structure
-- **Guard the call**: Always check `if (context.registerDiagnostics)` for backward compatibility
+- **Guard the call**: Check `if (context.registerDiagnostics)` for backward compatibility with hand-rolled test contexts
 
 ### How It Works
 
-- `context.registerDiagnostics` is set per-module during router creation in `module-loader.js`
+- Each module's frozen context provides a `registerDiagnostics` function scoped to that module's slug
+- Multiple calls accumulate — sub-routers can each register their own diagnostics (e.g., releases' planning, execution, and delivery)
 - All registered hooks are called in parallel with a 10-second timeout via `collectModuleDiagnostics()`
 - Errors in one module's hook don't affect others
 - Results appear under `modules.<slug>` in the must-gather bundle
@@ -330,7 +429,7 @@ module.exports = function registerRoutes(router, context) {
   // Register message provider (optional)
   if (context.registerMessageProvider) {
     context.registerMessageProvider('my-module:my-alert', async function(user) {
-      // user = { email, uid, isAdmin, isTeamAdmin, permissionTier }
+      // user = { email, uid, isAdmin, isTeamAdmin, isManager, roles }
 
       // Return empty array if nothing to alert on
       if (!someCondition) return []
@@ -360,21 +459,128 @@ module.exports = function registerRoutes(router, context) {
 
 ### Guidelines
 
-- **Guard the call**: Always check `if (context.registerMessageProvider)` for backward compatibility
-- **Synchronous registration**: Providers must be registered synchronously during `require(entryPath)` — the same constraint as `registerDiagnostics`. Deferred registration (e.g., in `setTimeout`) will fail because the context is cleaned up after module loading
+- **Guard the call**: Check `if (context.registerMessageProvider)` for backward compatibility with hand-rolled test contexts
+- **Synchronous registration**: Providers must be registered synchronously during `require(entryPath)` — the same constraint as `registerDiagnostics`
 - **Per-request execution**: Provider functions are called on every `GET /api/messages` request with the current user context. Keep them fast
 - **Timeout**: Each provider has a 5-second timeout. Providers that exceed this are skipped with a warning
 - **Error isolation**: If a provider throws or times out, other providers still run and the endpoint still returns results
-- **Early bailout**: Check `user.permissionTier` or `user.uid` early to skip expensive work for users who won't see the message
+- **Early bailout**: Check `user.isManager`, `user.isAdmin`, or `user.uid` early to skip expensive work for users who won't see the message
 - **Return an array**: Providers can return zero or more messages. Return `[]` when there is nothing to alert on
 
 ### How It Works
 
-- `context.registerMessageProvider` is set per-module during router creation in `module-loader.js`
+- Each module's frozen context provides a `registerMessageProvider` function that delegates to the shared message registry
 - All registered providers are called sequentially by the message registry on `GET /api/messages`
 - Provider results are merged with admin-stored messages from `data/messages.json`
 - The client fetches messages once on app load (non-blocking) and renders them as sticky banners inside the header
 - Users can dismiss messages per session (sessionStorage)
+
+## Secrets Declaration
+
+Modules declare their secret requirements in `module.json`. This enables startup validation, admin diagnostics, and ESLint enforcement preventing direct `process.env` access in module server code.
+
+### module.json
+
+```json
+{
+  "secrets": {
+    "platform": ["jira", "github"],
+    "module": [
+      {
+        "key": "MY_API_TOKEN",
+        "description": "API token for My Service",
+        "required": true
+      }
+    ],
+    "dynamic": {
+      "pattern": "MY_SERVICE_*_TOKEN",
+      "description": "Per-instance tokens for My Service"
+    }
+  }
+}
+```
+
+### Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `secrets.platform` | string[] | Platform secret group IDs to consume (`jira`, `github`, `gitlab`, `ipa`, `google`) |
+| `secrets.module` | object[] | Module-specific secrets with `key`, `description`, optional `required` (boolean), `group` (string), `exclusive` (boolean) |
+| `secrets.dynamic` | object | Dynamic secret pattern with `pattern` (string) and optional `description` |
+
+### Exclusive Groups
+
+When multiple secrets serve the same purpose (e.g., OAuth credentials vs. personal token), mark them as exclusive within a group:
+
+```json
+{
+  "secrets": {
+    "module": [
+      { "key": "OAUTH_CLIENT_ID", "description": "OAuth client ID", "group": "auth" },
+      { "key": "OAUTH_CLIENT_SECRET", "description": "OAuth secret", "group": "auth" },
+      { "key": "PERSONAL_TOKEN", "description": "Personal token fallback", "group": "auth", "exclusive": true }
+    ]
+  }
+}
+```
+
+### Accessing Secrets in Server Code
+
+Module server code accesses secrets via the context object, never via `process.env`:
+
+```javascript
+module.exports = function registerRoutes(router, context) {
+  // Static secrets (resolved once at startup)
+  const token = context.secrets.MY_API_TOKEN
+
+  // Dynamic secrets (resolved at call time from process.env)
+  const instanceToken = context.resolveSecret('MY_SERVICE_US_TOKEN')
+
+  // Register a validator for connectivity checks
+  // Important: never include secret values in messages — they appear in admin API responses
+  context.registerSecretValidator('MY_API_TOKEN', async function(value) {
+    // Return { valid: true } or { valid: false, message: 'reason' }
+    const ok = await testConnection(value)
+    return { valid: ok, message: ok ? 'Connected' : 'Connection failed' }
+  })
+}
+```
+
+### Using Shared Client Factories
+
+Shared server utilities provide `createX(config)` factories that bind credentials at creation time. Modules should use these instead of the legacy global functions:
+
+```javascript
+const { createJiraClient } = require('../../../shared/server/jira')
+
+module.exports = function registerRoutes(router, context) {
+  // Create a Jira client with credentials from context.secrets
+  const jira = createJiraClient({
+    email: (context.secrets && context.secrets.JIRA_EMAIL) || '',
+    token: (context.secrets && context.secrets.JIRA_TOKEN) || '',
+    host: process.env.JIRA_HOST  // Config, not secret — in ESLint ALLOWED set
+  })
+  const { jiraRequest, JIRA_HOST } = jira
+
+  // Use jiraRequest as before — same API, credentials bound in closure
+  router.get('/data', async (req, res) => {
+    const data = await jiraRequest('/rest/api/3/issue/KEY-1')
+    res.json(data)
+  })
+}
+```
+
+Available factories: `createJiraClient`, `createGoogleSheetsClient`, `createSmartsheetClient`, `createIpaClient`, `createBackupClient`. See `shared/API.md` for full signatures.
+
+### ESLint Enforcement
+
+The `org-pulse/no-module-process-env` ESLint rule prevents `process.env` access for secrets in `modules/**/server/**/*.js`. Non-secret configuration variables (`DEMO_MODE`, `NODE_ENV`, `JIRA_HOST`, etc.) are allowed. Test files are excluded.
+
+### Admin Diagnostics
+
+- `GET /api/admin/secrets/status` — returns configured/missing status for all secrets (never actual values)
+- `POST /api/admin/secrets/validate` — runs registered validators
+- Must-gather bundle includes `bundle.secrets` with full status
 
 ## PR Checklist
 

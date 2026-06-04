@@ -30,7 +30,8 @@ jobs:
       (github.event_name == 'pull_request' &&
        github.event.pull_request.head.repo.full_name == github.repository &&
        github.event.pull_request.draft != true &&
-       github.actor != 'github-actions[bot]') ||
+       github.actor != 'github-actions[bot]' &&
+       github.actor != 'dependabot[bot]') ||
       (github.event_name == 'pull_request_target' &&
        github.event.pull_request.head.repo.full_name != github.repository &&
        github.event.pull_request.draft != true &&
@@ -113,7 +114,7 @@ jobs:
 
       - name: Set up Node.js
         if: steps.check-paths.outputs.needs_review == 'true' && steps.context.outputs.is_fork != 'true' && steps.fork-guard.outputs.is_fork != 'true'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 20
           cache: 'npm'
@@ -180,7 +181,9 @@ jobs:
       # --- Shared: GCP auth ---
 
       - name: Authenticate to Google Cloud
-        if: steps.check-paths.outputs.needs_review == 'true' && steps.fork-guard.outputs.is_fork != 'true'
+        if: steps.check-paths.outputs.needs_review == 'true' && steps.fork-guard.outputs.is_fork != 'true' && env.HAS_GCP_KEY == 'true'
+        env:
+          HAS_GCP_KEY: ${{ secrets.GCP_SA_KEY != '' }}
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
@@ -268,6 +271,7 @@ jobs:
         with:
           use_vertex: "true"
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          allowed_non_write_users: "*"
           track_progress: true
           display_report: "true"
           allowed_bots: "claude"

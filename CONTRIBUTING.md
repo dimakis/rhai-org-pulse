@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- **Node.js 18+** and npm
+- **Node.js 20+** and npm
 - **Red Hat VPN** connection (for LDAP roster sync)
 - A **Jira Cloud API token** for live data — [create one here](https://id.atlassian.com/manage-profile/security/api-tokens)
 - Or just use **Demo Mode** (no credentials needed)
@@ -169,6 +169,9 @@ Smoke tests run Playwright in a container, so no local browser installation is n
 **macOS note:** The Playwright container bind-mounts your workspace and runs `npm ci`, which installs Linux-native packages into your local `node_modules/`. After running `make smoke-test`, you may need to run `npm ci` again to restore macOS-native packages before running local commands like `npm test` or `npm run dev`.
 
 #### Integration tests
+
+> [!IMPORTANT]
+> PRs that modify files in `modules/` (views, components, server routes, server logic) **require** corresponding integration test updates. This is enforced during code review. See [`.github/instructions/review.instructions.md`](.github/instructions/review.instructions.md) for the full policy and exceptions.
 
 Integration tests are run using **Playwright**. They validate that:
 1. Modules are visible _and_ clickable from the sidebar
