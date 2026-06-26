@@ -24,8 +24,10 @@ function makeFeature(overrides = {}) {
     dataSource: 'strat-creator',
     confidence: 'committed',
     readinessGates: {
-      ownerAssigned: true,
-      notBlocked: true,
+      isApproved: true,
+      hasRubric: true,
+      pmAssigned: true,
+      deliveryOwnerAssigned: true,
       pastRefinement: true,
       hasTargetVersion: true,
       noBlockingViolations: true
@@ -45,8 +47,10 @@ function makeHealthFeature(overrides = {}) {
     reviewers: {},
     confidence: 'ready',
     readinessGates: {
-      ownerAssigned: true,
-      notBlocked: true,
+      isApproved: true,
+      hasRubric: true,
+      pmAssigned: true,
+      deliveryOwnerAssigned: true,
       pastRefinement: true,
       hasTargetVersion: true,
       noBlockingViolations: true
@@ -75,9 +79,9 @@ describe('FeatureReadinessRow', () => {
       expect(wrapper.find('.italic').exists()).toBe(false)
     })
 
-    it('shows humanReviewStatus badge in status column', () => {
-      const wrapper = mountRow(makeFeature({ humanReviewStatus: 'approved' }))
-      expect(wrapper.text()).toContain('Approved')
+    it('shows Jira status in status column', () => {
+      const wrapper = mountRow(makeFeature({ status: 'In Progress' }))
+      expect(wrapper.text()).toContain('In Progress')
     })
 
     it('shows recommendation label', () => {
@@ -85,14 +89,14 @@ describe('FeatureReadinessRow', () => {
       expect(wrapper.text()).toContain('Approve')
     })
 
-    it('shows Awaiting Sign-off for awaiting-review status', () => {
-      const wrapper = mountRow(makeFeature({ humanReviewStatus: 'awaiting-review' }))
-      expect(wrapper.text()).toContain('Awaiting Sign-off')
+    it('shows Refinement status', () => {
+      const wrapper = mountRow(makeFeature({ status: 'Refinement' }))
+      expect(wrapper.text()).toContain('Refinement')
     })
 
-    it('shows Flagged for needs-review status', () => {
-      const wrapper = mountRow(makeFeature({ humanReviewStatus: 'needs-review' }))
-      expect(wrapper.text()).toContain('Flagged')
+    it('shows dash for missing status', () => {
+      const wrapper = mountRow(makeFeature({ status: null }))
+      expect(wrapper.text()).toContain('—')
     })
   })
 
@@ -152,11 +156,13 @@ describe('FeatureReadinessRow', () => {
       expect(wrapper.emitted('select')[0][0]).toEqual(feature)
     })
 
-    it('renders Jira link with correct href', () => {
+    it('renders feature key as navigate button with Jira external link', () => {
       const wrapper = mountRow(makeFeature({ key: 'RHAISTRAT-42' }))
-      const link = wrapper.find('a')
-      expect(link.attributes('href')).toBe('https://issues.redhat.com/browse/RHAISTRAT-42')
-      expect(link.text()).toBe('RHAISTRAT-42')
+      const keyButton = wrapper.find('button')
+      expect(keyButton.text()).toBe('RHAISTRAT-42')
+      const jiraLink = wrapper.find('a[href="https://issues.redhat.com/browse/RHAISTRAT-42"]')
+      expect(jiraLink.exists()).toBe(true)
+      expect(jiraLink.attributes('target')).toBe('_blank')
     })
 
     it('shows tilde prefix for fallback priority score', () => {
@@ -180,6 +186,44 @@ describe('FeatureReadinessRow', () => {
     it('shows needs-attention indicator', () => {
       const wrapper = mountRow(makeFeature({ needsAttention: true }))
       expect(wrapper.find('[title="Needs attention"]').exists()).toBe(true)
+    })
+
+    it('shows score breakdown popover when priorityScoreBreakdown is present', () => {
+      const breakdown = {
+        score: 62,
+        rawScore: 88,
+        signals: [
+          { name: 'Rubric', value: 0.75, weight: 30, raw: 6 },
+          { name: 'Priority', value: 0.6, weight: 35, raw: 'Major' }
+        ],
+        signalCount: 2,
+        maxSignals: 4,
+        completenessMultiplier: 0.7,
+        missing: ['Tier', 'Target Version']
+      }
+      const wrapper = mountRow(makeFeature({
+        effectivePriorityScore: 62,
+        priorityScoreFallback: true,
+        priorityScoreBreakdown: breakdown
+      }))
+      const scoreTd = wrapper.findAll('td').at(1)
+      const popover = scoreTd.find('div.absolute')
+      expect(popover.exists()).toBe(true)
+      expect(popover.text()).toContain('Score: 62 / 100')
+      expect(popover.text()).toContain('Rubric')
+      expect(popover.text()).toContain('Priority')
+      expect(popover.text()).toContain('0.7')
+      expect(popover.text()).toContain('Missing')
+    })
+
+    it('does not show popover when no breakdown available', () => {
+      const wrapper = mountRow(makeFeature({
+        effectivePriorityScore: 72,
+        priorityScoreFallback: false,
+        priorityScoreBreakdown: null
+      }))
+      const scoreTd = wrapper.findAll('td').at(1)
+      expect(scoreTd.find('div.absolute').exists()).toBe(false)
     })
   })
 })

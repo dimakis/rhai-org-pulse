@@ -55,6 +55,7 @@ npm run dev:full       # Starts Vite (5173) + Express (3001)
 - **Composite keys**: Teams = `orgKey::teamName` (e.g., `shgriffi::Model Serving`).
 - **Field options**: `data/team-data/field-options/<name>.json` — named allowed-value sets, referenced by `optionsRef`.
 - **Messages**: `data/messages.json` — admin announcements, merged with computed provider messages.
+- **Unified feature store**: `data/releases/execution/features/{KEY}.json` — canonical per-feature files owned by releases. Contains pipeline metrics, Jira fields, and optional `aiReview` namespace (AI Impact review scores, history). Index at `data/releases/execution/index.json`. AI Impact pushes review data via internal API (`POST /api/modules/releases/execution/ai-review/bulk`). AI Impact reads from releases store and reshapes for backward-compatible API responses.
 - **Data file formats**: See `docs/DATA-FORMATS.md`. Demo fixtures must match production format.
 
 ### Roster Sync (`shared/server/roster-sync/`)
@@ -135,17 +136,18 @@ Kustomize layers: `base/` (core platform + team-tracker) → `overlays/ai-eng/` 
 
 ### CI/CD
 - **`ci.yml`** — PRs + main: lint, test, build, kustomize validate. Required check: "Test & Build".
-- **`build-images.yml`** — main pushes: builds core images first (backend, frontend, frontend-builder, frontend-runtime), then AI Eng images FROM core, runs smoke tests, pushes to Quay (`:<sha>` + `:latest`), creates PR to update prod image tags, auto-merges.
+- **`build-images.yml`** — main pushes: builds core images first (backend, frontend, frontend-builder, frontend-runtime), then AI Eng images FROM core, runs smoke tests, pushes to Quay (`:<sha>` + `:latest`), commits prod image tag update directly to main (`[skip ci]`).
 - ConfigMap changes auto-trigger rollouts via kustomize `configMapGenerator` — ConfigMap names include a content hash suffix (e.g., `team-tracker-config-5h2f9k`), so any data change produces a new name and triggers a pod rollout automatically.
 
 **Branch protection** uses a GitHub repository ruleset on `main`:
 - Requires PRs (no direct pushes)
 - Requires "Test & Build" status check
-- Admin role has bypass (used by `GH_PAT` secret for CI auto-merge PRs)
+- GitHub App (`APP_ID`/`APP_PRIVATE_KEY`) has bypass for CI commits (version bumps, deploy tag updates)
 
 **Repo secrets:**
 - `QUAY_USERNAME` / `QUAY_PASSWORD` — Quay.io registry credentials for image push
-- `GH_PAT` — Personal access token with admin bypass, used by CI to create and auto-merge image tag update PRs
+- `APP_ID` / `APP_PRIVATE_KEY` — GitHub App credentials with branch protection bypass, used by CI for version bumps and deploy commits
+- `GH_PAT` — Personal access token, used by Claude issue workflows
 - `GCP_SA_KEY` — GCP service account JSON key for Vertex AI auth (Claude code review)
 
 **CronJob** (`deploy/openshift/base/cronjob-sync-refresh.yaml`): Fires every 15 minutes (`*/15 * * * *`), triggers cadence-aware `POST /api/admin/refresh-all`. Each handler declares its own cadence (e.g., `24h` for roster sync, `12h` for execution pipeline). Handlers that have run within their cadence window are skipped — most ticks complete in seconds. Backup runs as a refresh handler (`platform:backup`, cadence `24h`), not as a separate CronJob step. Uses `CRON_ADMIN_EMAIL` from ConfigMap.
@@ -173,15 +175,15 @@ Smoke tests verify:
 - Client-side routing functions (hash-based navigation)
 - Basic accessibility (semantic landmarks present)
 
-Playwright runs in a container (`mcr.microsoft.com/playwright:v1.60.0`), so no local browser installation needed. Works on any OS (RHEL/Podman, macOS/Docker, Ubuntu). The Makefile auto-detects the container runtime (prefers Podman on RHEL).
+Playwright runs in a container (`quay.io/browser/playwright-chromium`), so no local browser installation needed. Works on any OS (RHEL/Podman, macOS/Docker, Ubuntu). The Makefile auto-detects the container runtime (prefers Podman on RHEL).
 
-**IMPORTANT:** The Playwright version must match between `package.json` (`@playwright/test`) and `Makefile` (`PLAYWRIGHT_IMAGE`). When updating Playwright, change both files to the same version to prevent browser binary mismatches.
+**IMPORTANT:** The Playwright version must match between `package.json` (`@playwright/test`) and `Makefile` (`PLAYWRIGHT_IMAGE`). When updating Playwright, change both files to the same version to prevent browser binary mismatches. The Quay image uses `playwright-<version>` tags (e.g., `playwright-1.60.0`).
 
 CI workflow (`build-images.yml`):
 1. Builds core images (backend, frontend, frontend-builder, frontend-runtime) with smoke test
 2. Builds AI Eng images FROM core (backend extends core-backend, frontend uses core-builder + core-runtime)
 3. Runs Playwright smoke tests against AI Eng images
-4. Pushes all images to Quay, creates PR to update prod image tags
+4. Pushes all images to Quay, commits prod image tag update directly to main
 
 **Integration tests** use Playwright to verify module-specific functionality against production containers in demo mode. Located in `tests/integration/<module>.spec.js`:
 

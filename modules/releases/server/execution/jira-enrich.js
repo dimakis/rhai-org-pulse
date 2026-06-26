@@ -11,6 +11,7 @@ const {
   serializeField,
   computeRiceStatus
 } = require('../../server/hygiene/jira-fetch');
+const { deriveHumanReviewStatus, extractSignOffInfo } = require('./ai-review-fields');
 
 const BATCH_SIZE = 40;
 const THROTTLE_MS = 1000;
@@ -87,17 +88,17 @@ function extractIssueLinks(issueLinks) {
  */
 function checkIsBlocked(issueLinks) {
   if (!Array.isArray(issueLinks)) return false;
-  const closedStatuses = ['Closed', 'Resolved', 'Done'];
 
   for (let i = 0; i < issueLinks.length; i++) {
     const link = issueLinks[i];
     if (!link.inwardIssue) continue;
     const type = link.type || {};
     if (type.name !== 'Blocks' && type.inward !== 'is blocked by') continue;
-    const linkedStatus = link.inwardIssue.fields &&
+    const linkedStatusCat = link.inwardIssue.fields &&
       link.inwardIssue.fields.status &&
-      link.inwardIssue.fields.status.name;
-    if (closedStatuses.indexOf(linkedStatus) === -1) {
+      link.inwardIssue.fields.status.statusCategory &&
+      link.inwardIssue.fields.status.statusCategory.name;
+    if (linkedStatusCat !== 'Done') {
       return true;
     }
   }
@@ -175,6 +176,9 @@ function transformForEnrichment(rawIssue) {
   const isBlocked = checkIsBlocked(fields.issuelinks);
   const linkedRfeKey = findLinkedRfeKey(fields.issuelinks);
 
+  // Derive humanReviewStatus from labels (no changelog needed)
+  const humanReviewStatus = deriveHumanReviewStatus(labels);
+
   return {
     key: rawIssue.key,
     summary: fields.summary || '',
@@ -201,7 +205,11 @@ function transformForEnrichment(rawIssue) {
     linkedRfeKey,
     issueLinks: issueLinksNormalized,
     created: fields.created || null,
-    updated: fields.updated || null
+    updated: fields.updated || null,
+    // AI review enrichment: humanReviewStatus derived from labels
+    aiReview: {
+      humanReviewStatus
+    }
   };
 }
 
@@ -225,7 +233,7 @@ async function enrichFeatures(keys, jiraRequestFn, fetchAllJqlResultsFn) {
     const jql = 'key in (' + batchKeys.map(k => '"' + k + '"').join(', ') + ')';
 
     try {
-      const issues = await fetchAllJqlResultsFn(jiraRequestFn, jql, ENRICH_FIELDS, {
+      const issues = await fetchAllJqlResultsFn(jql, ENRICH_FIELDS, {
         expand: 'renderedFields'
       });
 
@@ -263,6 +271,65 @@ async function enrichFeatures(keys, jiraRequestFn, fetchAllJqlResultsFn) {
   return result;
 }
 
+const SIGN_OFF_BATCH_SIZE = 20;
+
+/**
+ * Targeted sign-off detection pass for features that have aiReview data,
+ * humanReviewStatus === 'approved', but lack approvedBy/approvedAt.
+ * Fetches only labels + changelog for a small subset of features.
+ *
+ * @param {string[]} keys - Feature keys to check
+ * @param {object} storage - Storage abstraction
+ * @param {Function} jiraRequestFn
+ * @param {Function} fetchAllJqlResultsFn
+ * @returns {Promise<Map<string, { approvedBy: string, approvedAt: string }>>}
+ */
+async function fetchSignOffDetails(keys, storage, jiraRequestFn, fetchAllJqlResultsFn) {
+  const DATA_PREFIX = 'releases/execution';
+  const signOffMap = new Map();
+
+  // Filter to only keys that need sign-off backfill
+  const needsSignOff = [];
+  for (let i = 0; i < keys.length; i++) {
+    const feature = storage.readFromStorage(DATA_PREFIX + '/features/' + keys[i] + '.json');
+    if (!feature || !feature.aiReview) continue;
+    if (feature.aiReview.humanReviewStatus === 'approved' &&
+        !feature.aiReview.approvedBy && !feature.aiReview.approvedAt) {
+      needsSignOff.push(keys[i]);
+    }
+  }
+
+  if (needsSignOff.length === 0) return signOffMap;
+
+  console.log('[jira-enrich] Sign-off detection pass for ' + needsSignOff.length + ' features');
+
+  const batches = batch(needsSignOff, SIGN_OFF_BATCH_SIZE);
+  for (let bi = 0; bi < batches.length; bi++) {
+    if (bi > 0) await sleep(THROTTLE_MS);
+
+    const batchKeys = batches[bi];
+    const jql = 'key in (' + batchKeys.map(function(k) { return '"' + k + '"'; }).join(', ') + ')';
+
+    try {
+      const issues = await fetchAllJqlResultsFn(jql, 'labels', {
+        expand: 'changelog'
+      });
+
+      for (let i = 0; i < issues.length; i++) {
+        const issue = issues[i];
+        const info = extractSignOffInfo(issue.changelog);
+        if (info) {
+          signOffMap.set(issue.key, info);
+        }
+      }
+    } catch (err) {
+      console.warn('[jira-enrich] Sign-off batch ' + (bi + 1) + '/' + batches.length + ' failed:', err.message);
+    }
+  }
+
+  return signOffMap;
+}
+
 /**
  * Discover epics linked to feature keys via parent/Epic Link.
  * @param {string[]} featureKeys - Feature issue keys
@@ -285,7 +352,7 @@ async function fetchEpicsForFeatures(featureKeys, jiraRequestFn, fetchAllJqlResu
     const fields = 'summary,status,parent,customfield_10014';
 
     try {
-      const children = await fetchAllJqlResultsFn(jiraRequestFn, jql, fields);
+      const children = await fetchAllJqlResultsFn(jql, fields);
 
       for (let i = 0; i < children.length; i++) {
         const child = children[i];
@@ -325,7 +392,7 @@ async function fetchEpicsForFeatures(featureKeys, jiraRequestFn, fetchAllJqlResu
  * @returns {Promise<Array<object>>} Array of enriched feature objects
  */
 async function discoverFeatures(jql, jiraRequestFn, fetchAllJqlResultsFn) {
-  const issues = await fetchAllJqlResultsFn(jiraRequestFn, jql, ENRICH_FIELDS, {
+  const issues = await fetchAllJqlResultsFn(jql, ENRICH_FIELDS, {
     expand: 'renderedFields'
   });
 
@@ -339,6 +406,7 @@ async function discoverFeatures(jql, jiraRequestFn, fetchAllJqlResultsFn) {
 module.exports = {
   enrichFeatures,
   fetchEpicsForFeatures,
+  fetchSignOffDetails,
   discoverFeatures,
   transformForEnrichment,
   extractIssueLinks,

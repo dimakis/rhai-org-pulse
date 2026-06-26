@@ -22,7 +22,7 @@ vi.mock('../../../server/planning/config-backup', () => ({
 
 vi.mock('../../../server/planning/doc-import', () => ({
   previewDocImport: vi.fn(),
-  executeDocImport: vi.fn()
+  executeDocImport: vi.fn().mockResolvedValue({ bigRocks: [], imported: 0 })
 }))
 
 vi.mock('../../../../../shared/server/auth', () => ({
@@ -150,7 +150,7 @@ describe('release-planning routes', function() {
       storage: storage,
       requireAuth: function(req, res, next) { next() },
       requireAdmin: function(req, res, next) { next() },
-      requireReleaseManager: function(req, res, next) { next() },
+      requirePlanningManager: function(req, res, next) { next() },
       requireScope: function() { return function(req, res, next) { next() } },
       registerDiagnostics: vi.fn()
     }
@@ -168,6 +168,7 @@ describe('release-planning routes', function() {
         'GET /refresh/status',
         'GET /config',
         'GET /permissions',
+        'GET /pillar-options',
         'PUT /releases/:version/big-rocks/reorder',
         'PUT /releases/:version/big-rocks/:name',
         'POST /releases/:version/big-rocks',
@@ -482,16 +483,49 @@ describe('release-planning routes', function() {
       expect(res._json.canEdit).toBe(true)
     })
 
-    it('returns canEdit true for release manager', function() {
-      const req = makeReq({ isAdmin: false, isReleaseManager: true, userEmail: 'pm@test.com' })
+    it('returns canEdit true for planning manager', function() {
+      const req = makeReq({ isAdmin: false, isPlanningManager: true, userEmail: 'pm@test.com' })
       const res = callRoute(router._routes, 'GET', '/permissions', req)
       expect(res._json.canEdit).toBe(true)
     })
 
     it('returns canEdit true for regular user', function() {
-      const req = makeReq({ isAdmin: false, isReleaseManager: false, userEmail: 'user@test.com' })
+      const req = makeReq({ isAdmin: false, isPlanningManager: false, userEmail: 'user@test.com' })
       const res = callRoute(router._routes, 'GET', '/permissions', req)
       expect(res._json.canEdit).toBe(true)
+    })
+
+    it('returns granular flags for admin', function() {
+      const req = makeReq({ isAdmin: true, isPlanningManager: false, userEmail: 'admin@test.com' })
+      const res = callRoute(router._routes, 'GET', '/permissions', req)
+      expect(res._json).toEqual({
+        canEdit: true,
+        canAdd: true,
+        canDelete: true,
+        canReorder: true
+      })
+    })
+
+    it('returns granular flags for planning-manager', function() {
+      const req = makeReq({ isAdmin: false, isPlanningManager: true, userEmail: 'pm@test.com' })
+      const res = callRoute(router._routes, 'GET', '/permissions', req)
+      expect(res._json).toEqual({
+        canEdit: true,
+        canAdd: true,
+        canDelete: true,
+        canReorder: true
+      })
+    })
+
+    it('returns restricted flags for regular user', function() {
+      const req = makeReq({ isAdmin: false, isPlanningManager: false, userEmail: 'user@test.com' })
+      const res = callRoute(router._routes, 'GET', '/permissions', req)
+      expect(res._json).toEqual({
+        canEdit: true,
+        canAdd: false,
+        canDelete: false,
+        canReorder: false
+      })
     })
   })
 
@@ -603,26 +637,30 @@ describe('release-planning routes', function() {
     })
   })
 
-  // ─── Open Access ───
+  // ─── Role-gated access ───
 
-  describe('open access for authenticated users', function() {
-    it('allows non-admin, non-release-manager to create big rocks', async function() {
-      const req = makeReq({
-        isAdmin: false,
-        isReleaseManager: false,
-        userEmail: 'user@test.com',
-        params: { version: '3.5' },
-        body: VALID_ROCK
-      })
-      const res = await callRoute(router._routes, 'POST', '/releases/:version/big-rocks', req)
-      expect(res._status).toBe(201)
+  describe('planning-manager role enforcement', function() {
+    it('POST big-rocks route includes requirePlanningManager middleware', function() {
+      const handlers = router._routes['POST /releases/:version/big-rocks']
+      // Should include requirePlanningManager in the middleware chain
+      expect(handlers.length).toBeGreaterThanOrEqual(3)
     })
 
-    it('allows non-admin, non-release-manager to update big rocks', async function() {
+    it('DELETE big-rocks route includes requirePlanningManager middleware', function() {
+      const handlers = router._routes['DELETE /releases/:version/big-rocks/:name']
+      expect(handlers.length).toBeGreaterThanOrEqual(4)
+    })
+
+    it('PUT reorder route includes requirePlanningManager middleware', function() {
+      const handlers = router._routes['PUT /releases/:version/big-rocks/reorder']
+      expect(handlers.length).toBeGreaterThanOrEqual(3)
+    })
+
+    it('allows any authenticated user to edit (PUT) existing big rocks', async function() {
       setupVersion(storage._store, '3.5', [VALID_ROCK])
       const req = makeReq({
         isAdmin: false,
-        isReleaseManager: false,
+        isPlanningManager: false,
         userEmail: 'user@test.com',
         params: { version: '3.5', name: 'Test Rock' },
         body: Object.assign({}, VALID_ROCK, { notes: 'User updated' })
@@ -630,17 +668,62 @@ describe('release-planning routes', function() {
       const res = await callRoute(router._routes, 'PUT', '/releases/:version/big-rocks/:name', req)
       expect(res._status).toBe(200)
     })
+  })
 
-    it('allows non-admin, non-release-manager to delete big rocks', async function() {
+  // ─── Doc import replace mode ───
+
+  describe('doc import replace mode enforcement', function() {
+    it('rejects replace mode for non-admin, non-planning-manager', async function() {
       setupVersion(storage._store, '3.5', [VALID_ROCK])
       const req = makeReq({
         isAdmin: false,
-        isReleaseManager: false,
+        isPlanningManager: false,
         userEmail: 'user@test.com',
-        params: { version: '3.5', name: 'Test Rock' }
+        params: { version: '3.5' },
+        body: { docId: 'test-doc', mode: 'replace' }
       })
-      const res = await callRoute(router._routes, 'DELETE', '/releases/:version/big-rocks/:name', req)
-      expect(res._status).toBe(200)
+      const res = await callRoute(router._routes, 'POST', '/releases/:version/import/doc', req)
+      expect(res._status).toBe(403)
+      expect(res._json.error).toMatch(/planning-manager/)
+    })
+
+    it('allows replace mode for admin', async function() {
+      setupVersion(storage._store, '3.5', [VALID_ROCK])
+      const req = makeReq({
+        isAdmin: true,
+        isPlanningManager: false,
+        userEmail: 'admin@test.com',
+        params: { version: '3.5' },
+        body: { docId: 'test-doc', mode: 'replace' }
+      })
+      const res = await callRoute(router._routes, 'POST', '/releases/:version/import/doc', req)
+      expect(res._status).not.toBe(403)
+    })
+
+    it('allows replace mode for planning-manager', async function() {
+      setupVersion(storage._store, '3.5', [VALID_ROCK])
+      const req = makeReq({
+        isAdmin: false,
+        isPlanningManager: true,
+        userEmail: 'pm@test.com',
+        params: { version: '3.5' },
+        body: { docId: 'test-doc', mode: 'replace' }
+      })
+      const res = await callRoute(router._routes, 'POST', '/releases/:version/import/doc', req)
+      expect(res._status).not.toBe(403)
+    })
+
+    it('allows append mode for non-planning-manager', async function() {
+      setupVersion(storage._store, '3.5', [VALID_ROCK])
+      const req = makeReq({
+        isAdmin: false,
+        isPlanningManager: false,
+        userEmail: 'user@test.com',
+        params: { version: '3.5' },
+        body: { docId: 'test-doc', mode: 'append' }
+      })
+      const res = await callRoute(router._routes, 'POST', '/releases/:version/import/doc', req)
+      expect(res._status).not.toBe(403)
     })
   })
 
@@ -661,6 +744,140 @@ describe('release-planning routes', function() {
     it('includes blockDuringImpersonation middleware on POST import/doc', function() {
       const handlers = router._routes['POST /releases/:version/import/doc']
       expect(handlers.length).toBeGreaterThanOrEqual(4)
+    })
+  })
+
+  // ─── GET /pillar-options ───
+
+  describe('GET /pillar-options', function() {
+    it('returns pillar names from PM Hub config', function() {
+      storage._store['releases/pm-hub/pillar-config.json'] = {
+        pillars: [
+          { name: 'Inference', components: [] },
+          { name: 'Platform', components: [] }
+        ]
+      }
+      const req = makeReq()
+      const res = callRoute(router._routes, 'GET', '/pillar-options', req)
+      expect(res._json.options).toEqual(['Inference', 'Platform'])
+    })
+
+    it('returns empty array when no PM Hub config exists', function() {
+      const req = makeReq()
+      const res = callRoute(router._routes, 'GET', '/pillar-options', req)
+      expect(res._json.options).toEqual([])
+    })
+
+    it('filters out empty pillar names', function() {
+      storage._store['releases/pm-hub/pillar-config.json'] = {
+        pillars: [
+          { name: 'Inference', components: [] },
+          { name: '', components: [] },
+          { name: 'Platform', components: [] }
+        ]
+      }
+      const req = makeReq()
+      const res = callRoute(router._routes, 'GET', '/pillar-options', req)
+      expect(res._json.options).toEqual(['Inference', 'Platform'])
+    })
+  })
+
+  // ─── Comma rejection in create/update ───
+
+  describe('comma rejection', function() {
+    it('rejects creating a big rock with comma in name', async function() {
+      const req = makeReq({
+        params: { version: '3.5' },
+        body: Object.assign({}, VALID_ROCK, { name: 'Inference, Training' })
+      })
+      const res = await callRoute(router._routes, 'POST', '/releases/:version/big-rocks', req)
+      expect(res._status).toBe(400)
+      expect(res._json.fields.name).toContain('commas')
+    })
+
+    it('rejects renaming a big rock to a name with comma', async function() {
+      setupVersion(storage._store, '3.5', [VALID_ROCK])
+      const req = makeReq({
+        params: { version: '3.5', name: 'Test Rock' },
+        body: Object.assign({}, VALID_ROCK, { name: 'Test, Rock' })
+      })
+      const res = await callRoute(router._routes, 'PUT', '/releases/:version/big-rocks/:name', req)
+      expect(res._status).toBe(400)
+      expect(res._json.fields.name).toContain('commas')
+    })
+  })
+
+  // ─── Pillar validation in create/update ───
+
+  describe('pillar validation against PM Hub config', function() {
+    it('rejects invalid pillar when PM Hub config exists', async function() {
+      storage._store['releases/pm-hub/pillar-config.json'] = {
+        pillars: [
+          { name: 'Inference', components: [] },
+          { name: 'Platform', components: [] }
+        ]
+      }
+      const req = makeReq({
+        params: { version: '3.5' },
+        body: Object.assign({}, VALID_ROCK, { name: 'New Rock', pillar: 'NotAPillar' })
+      })
+      const res = await callRoute(router._routes, 'POST', '/releases/:version/big-rocks', req)
+      expect(res._status).toBe(400)
+      expect(res._json.fields.pillar).toContain('must be one of')
+    })
+
+    it('accepts valid pillar when PM Hub config exists', async function() {
+      storage._store['releases/pm-hub/pillar-config.json'] = {
+        pillars: [
+          { name: 'Inference', components: [] },
+          { name: 'Platform', components: [] }
+        ]
+      }
+      const req = makeReq({
+        params: { version: '3.5' },
+        body: Object.assign({}, VALID_ROCK, { name: 'New Rock', pillar: 'Inference' })
+      })
+      const res = await callRoute(router._routes, 'POST', '/releases/:version/big-rocks', req)
+      expect(res._status).toBe(201)
+    })
+
+    it('accepts any pillar when no PM Hub config exists', async function() {
+      const req = makeReq({
+        params: { version: '3.5' },
+        body: Object.assign({}, VALID_ROCK, { name: 'New Rock', pillar: 'Anything' })
+      })
+      const res = await callRoute(router._routes, 'POST', '/releases/:version/big-rocks', req)
+      expect(res._status).toBe(201)
+    })
+  })
+
+  // ─── Rename audit log ───
+
+  describe('rename audit log', function() {
+    it('logs rename in audit summary when name changes', async function() {
+      setupVersion(storage._store, '3.5', [VALID_ROCK])
+      const req = makeReq({
+        params: { version: '3.5', name: 'Test Rock' },
+        body: Object.assign({}, VALID_ROCK, { name: 'New Name' })
+      })
+      await callRoute(router._routes, 'PUT', '/releases/:version/big-rocks/:name', req)
+      const log = storage._store['releases/audit-log.json']
+      expect(log.entries[0].summary).toContain('Renamed Big Rock')
+      expect(log.entries[0].summary).toContain('Test Rock')
+      expect(log.entries[0].summary).toContain('New Name')
+      expect(log.entries[0].details.newName).toBe('New Name')
+    })
+
+    it('uses standard summary when name does not change', async function() {
+      setupVersion(storage._store, '3.5', [VALID_ROCK])
+      const req = makeReq({
+        params: { version: '3.5', name: 'Test Rock' },
+        body: Object.assign({}, VALID_ROCK, { notes: 'Updated' })
+      })
+      await callRoute(router._routes, 'PUT', '/releases/:version/big-rocks/:name', req)
+      const log = storage._store['releases/audit-log.json']
+      expect(log.entries[0].summary).toBe('Updated Big Rock "Test Rock"')
+      expect(log.entries[0].details.newName).toBeUndefined()
     })
   })
 

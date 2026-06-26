@@ -1,15 +1,19 @@
 import { describe, it, expect } from 'vitest'
 
 const {
-  isHealthFeatureReady,
+  computeReadiness,
   buildFeatureReadiness,
   computeBlockers,
   computeBestAvailableScore,
   computeTierScore,
   computeTargetVersionScore,
   hasBlockingViolations,
+  computeHygieneStatus,
   computeConfidence,
-  collectFilterMeta
+  collectFilterMeta,
+  buildCanonicalKeySet,
+  mergeFeatureData,
+  MAX_SIGNALS
 } = require('../feature-readiness')
 
 // ---------------------------------------------------------------------------
@@ -40,10 +44,117 @@ function makeFeaturesStore(features) {
   return { lastSyncedAt: '2026-01-01T00:00:00.000Z', totalFeatures: Object.keys(features).length, features }
 }
 
+/**
+ * Convert feature store format ({ features: { key: { latest, history } } })
+ * into unified releases execution storage entries (index + per-feature files).
+ * Returns a flat object of storage keys to spread into makeReadFromStorage.
+ */
+function convertToUnifiedFormat(aiData) {
+  if (!aiData || !aiData.features) return {}
+
+  var result = {}
+  var indexFeatures = []
+
+  var keys = Object.keys(aiData.features)
+  for (var i = 0; i < keys.length; i++) {
+    var key = keys[i]
+    var entry = aiData.features[key]
+    if (!entry || !entry.latest) continue
+    var latest = entry.latest
+
+    // Build unified feature file
+    var featureFile = {
+      key: key,
+      summary: latest.title || '',
+      status: latest.status || null,
+      priority: latest.priority || null,
+      components: latest.components || [],
+      labels: latest.labels || [],
+      riceScore: latest.riceScore != null ? latest.riceScore : null,
+      linkedRfeKey: latest.sourceRfe || null,
+      aiReview: {
+        title: latest.title || '',
+        sourceRfe: latest.sourceRfe || null,
+        size: latest.size || null,
+        recommendation: latest.recommendation || null,
+        needsAttention: latest.needsAttention || false,
+        humanReviewStatus: latest.humanReviewStatus || null,
+        scores: latest.scores || {},
+        reviewers: latest.reviewers || {},
+        reviewedAt: latest.reviewedAt || null,
+        approvedBy: latest.approvedBy || null,
+        approvedAt: latest.approvedAt || null,
+        labels: latest.labels || [],
+        components: latest.components || [],
+        history: entry.history || []
+      }
+    }
+    result['releases/execution/features/' + key + '.json'] = featureFile
+
+    // Build index entry with slim aiReview
+    indexFeatures.push({
+      key: key,
+      summary: latest.title || '',
+      status: latest.status || null,
+      statusCategory: null,
+      priority: latest.priority || null,
+      assignee: null,
+      fixVersions: [],
+      labels: latest.labels || [],
+      completionPct: 0,
+      epicCount: 0,
+      issueCount: 0,
+      blockerCount: 0,
+      health: null,
+      lastUpdated: null,
+      targetVersions: null,
+      pm: null,
+      architect: null,
+      parentKey: null,
+      colorStatus: null,
+      ownerStatusColor: null,
+      aiReview: {
+        recommendation: latest.recommendation || null,
+        scores: latest.scores || {},
+        humanReviewStatus: latest.humanReviewStatus || null,
+        needsAttention: latest.needsAttention || false,
+        reviewedAt: latest.reviewedAt || null
+      }
+    })
+  }
+
+  result['releases/execution/index.json'] = {
+    fetchedAt: aiData.lastSyncedAt || '2026-01-01T00:00:00.000Z',
+    schemaVersion: 'v2',
+    featureCount: indexFeatures.length,
+    features: indexFeatures
+  }
+
+  return result
+}
+
 function makeReadFromStorage(overrides) {
+  var effective = Object.assign({}, overrides)
+  // Merge index features when multiple sources contribute entries
+  // (e.g., convertToUnifiedFormat entries + explicit index entries)
+  if (effective['releases/execution/index.json']) {
+    var idx = effective['releases/execution/index.json']
+    if (idx.features) {
+      var seen = new Set()
+      var deduped = []
+      for (var di = 0; di < idx.features.length; di++) {
+        if (!seen.has(idx.features[di].key)) {
+          seen.add(idx.features[di].key)
+          deduped.push(idx.features[di])
+        }
+      }
+      idx.features = deduped
+      idx.featureCount = deduped.length
+    }
+  }
   return function(key) {
-    if (Object.prototype.hasOwnProperty.call(overrides, key)) {
-      return overrides[key]
+    if (Object.prototype.hasOwnProperty.call(effective, key)) {
+      return effective[key]
     }
     return null
   }
@@ -202,56 +313,85 @@ describe('computeConfidence', function() {
 // ---------------------------------------------------------------------------
 
 describe('computeBestAvailableScore', function() {
+  it('returns an object with score, rawScore, signals, and breakdown fields', function() {
+    var result = computeBestAvailableScore({ priority: 'Normal', rubricTotal: 4, tier: 'T1' })
+    expect(result).toHaveProperty('score')
+    expect(result).toHaveProperty('rawScore')
+    expect(result).toHaveProperty('signals')
+    expect(result).toHaveProperty('signalCount')
+    expect(result).toHaveProperty('maxSignals', MAX_SIGNALS)
+    expect(result).toHaveProperty('completenessMultiplier')
+    expect(result).toHaveProperty('missing')
+    expect(Array.isArray(result.signals)).toBe(true)
+    expect(Array.isArray(result.missing)).toBe(true)
+  })
+
   describe('signals: rubric proxy + priority only (no riceScore, no tier, no target version)', function() {
-    it('Blocker priority + rubricTotal=8 → 100', function() {
-      // (1.0*30 + 1.0*25) / 55 * 100 = 100
-      expect(computeBestAvailableScore({ priority: 'Blocker', rubricTotal: 8 })).toBe(100)
+    it('Blocker priority + rubricTotal=8 rawScore=100, penalized by completeness', function() {
+      var result = computeBestAvailableScore({ priority: 'Blocker', rubricTotal: 8 })
+      expect(result.rawScore).toBe(100)
+      expect(result.signalCount).toBe(2)
+      expect(result.completenessMultiplier).toBe(0.7)
+      expect(result.score).toBe(70)
     })
 
-    it('Normal priority + rubricTotal=4 → 45', function() {
-      // (0.5*30 + 0.4*25) / 55 * 100 = round(45.45) = 45
-      expect(computeBestAvailableScore({ priority: 'Normal', rubricTotal: 4 })).toBe(45)
+    it('Normal priority + rubricTotal=4 rawScore=45, penalized', function() {
+      var result = computeBestAvailableScore({ priority: 'Normal', rubricTotal: 4 })
+      expect(result.rawScore).toBe(45)
+      expect(result.signalCount).toBe(2)
+      expect(result.score).toBe(Math.round(45 * 0.7))
     })
 
     it('unknown priority with rubricTotal=0 redistributes to priority only', function() {
-      // hasValueSignal=false, only priority signal: (0.4*35) / 35 * 100 = 40
-      expect(computeBestAvailableScore({ priority: 'Unknown', rubricTotal: 0 })).toBe(40)
+      var result = computeBestAvailableScore({ priority: 'Unknown', rubricTotal: 0 })
+      expect(result.rawScore).toBe(40)
+      expect(result.signalCount).toBe(1)
+      expect(result.completenessMultiplier).toBe(0.5)
+      expect(result.score).toBe(20)
     })
 
     it('missing priority uses 0.4 fallback', function() {
-      expect(computeBestAvailableScore({ rubricTotal: 0 })).toBe(40)
+      var result = computeBestAvailableScore({ rubricTotal: 0 })
+      expect(result.rawScore).toBe(40)
+      expect(result.signalCount).toBe(1)
+      expect(result.score).toBe(20)
     })
 
     it('missing rubricTotal redistributes weights', function() {
-      // hasValueSignal=false, only priority: (1.0*35) / 35 * 100 = 100
-      expect(computeBestAvailableScore({ priority: 'Blocker' })).toBe(100)
+      var result = computeBestAvailableScore({ priority: 'Blocker' })
+      expect(result.rawScore).toBe(100)
+      expect(result.signalCount).toBe(1)
+      expect(result.score).toBe(50)
     })
   })
 
   describe('signals: rubric proxy + priority + tier (no riceScore, no target version)', function() {
-    it('Blocker + rubricTotal=8 + T1 → 100', function() {
-      // hasValueSignal=true, totalWeight = 30 + 25 + 25 = 80
-      // (1.0*30 + 1.0*25 + 1.0*25) / 80 * 100 = 100
-      expect(computeBestAvailableScore({ priority: 'Blocker', rubricTotal: 8, tier: 'T1' })).toBe(100)
+    it('Blocker + rubricTotal=8 + T1 rawScore=100, 3 signals', function() {
+      var result = computeBestAvailableScore({ priority: 'Blocker', rubricTotal: 8, tier: 'T1' })
+      expect(result.rawScore).toBe(100)
+      expect(result.signalCount).toBe(3)
+      expect(result.completenessMultiplier).toBe(0.85)
+      expect(result.score).toBe(85)
     })
 
-    it('Normal + rubricTotal=4 + T2 → 49', function() {
-      // rubricProxy=4/8=0.5, tier=T2=0.6, priority=0.4
-      // (0.5*30 + 0.6*25 + 0.4*25) / 80 * 100
-      // = (15 + 15 + 10) / 80 * 100 = 50
-      expect(computeBestAvailableScore({ priority: 'Normal', rubricTotal: 4, tier: 'T2' })).toBe(50)
+    it('Normal + rubricTotal=4 + T2 rawScore=50, 3 signals', function() {
+      var result = computeBestAvailableScore({ priority: 'Normal', rubricTotal: 4, tier: 'T2' })
+      expect(result.rawScore).toBe(50)
+      expect(result.signalCount).toBe(3)
+      expect(result.score).toBe(Math.round(50 * 0.85))
     })
   })
 
   describe('signals with target version', function() {
-    it('includes target version weight when configured versions provided', function() {
-      // hasValueSignal=true (rubric>0), all signals: rubric(30) + tier(25) + priority(25) + tv(20) = 100
-      // rubric=1.0, tier=T1=1.0, priority=Blocker=1.0, tv=first=1.0
-      var score = computeBestAvailableScore(
+    it('all 4 signals: no completeness penalty', function() {
+      var result = computeBestAvailableScore(
         { priority: 'Blocker', rubricTotal: 8, tier: 'T1', targetVersions: ['3.6'] },
         ['3.6']
       )
-      expect(score).toBe(100)
+      expect(result.signalCount).toBe(4)
+      expect(result.completenessMultiplier).toBe(1.0)
+      expect(result.rawScore).toBe(result.score)
+      expect(result.score).toBe(100)
     })
 
     it('later target version lowers score', function() {
@@ -263,7 +403,7 @@ describe('computeBestAvailableScore', function() {
         { priority: 'Normal', rubricTotal: 4, tier: 'T1', targetVersions: ['3.7'] },
         ['3.5', '3.6', '3.7']
       )
-      expect(first).toBeGreaterThan(last)
+      expect(first.score).toBeGreaterThan(last.score)
     })
 
     it('no target version gives lowest tv score', function() {
@@ -275,7 +415,7 @@ describe('computeBestAvailableScore', function() {
         { priority: 'Normal', rubricTotal: 4, tier: 'T1', targetVersions: [] },
         ['3.6']
       )
-      expect(withTv).toBeGreaterThan(noTv)
+      expect(withTv.score).toBeGreaterThan(noTv.score)
     })
   })
 
@@ -283,30 +423,36 @@ describe('computeBestAvailableScore', function() {
     it('T1 rock priority 1 scores higher than rock priority 8', function() {
       var rock1 = computeBestAvailableScore({ priority: 'Normal', rubricTotal: 4, tier: 'T1', rockPriority: 1 })
       var rock8 = computeBestAvailableScore({ priority: 'Normal', rubricTotal: 4, tier: 'T1', rockPriority: 8 })
-      expect(rock1).toBeGreaterThan(rock8)
+      expect(rock1.score).toBeGreaterThan(rock8.score)
     })
 
     it('T2 rockPriority is ignored', function() {
       var rock1 = computeBestAvailableScore({ priority: 'Normal', rubricTotal: 4, tier: 'T2', rockPriority: 1 })
       var rock8 = computeBestAvailableScore({ priority: 'Normal', rubricTotal: 4, tier: 'T2', rockPriority: 8 })
-      expect(rock1).toBe(rock8)
+      expect(rock1.score).toBe(rock8.score)
     })
   })
 
   describe('signals: no RICE, no rubric (health-pipeline features)', function() {
-    it('T1 + Blocker → high score', function() {
-      var score = computeBestAvailableScore({ priority: 'Blocker', rubricTotal: 0, tier: 'T1' })
-      expect(score).toBeGreaterThanOrEqual(70)
+    it('T1 + Blocker with 2 signals', function() {
+      var result = computeBestAvailableScore({ priority: 'Blocker', rubricTotal: 0, tier: 'T1' })
+      expect(result.signalCount).toBe(2)
+      expect(result.completenessMultiplier).toBe(0.7)
+      expect(result.rawScore).toBe(100)
+      expect(result.score).toBe(70)
     })
 
-    it('no tier → only priority', function() {
-      // (0.4*35) / 35 * 100 = 40
-      expect(computeBestAvailableScore({ priority: 'Normal', rubricTotal: 0 })).toBe(40)
+    it('no tier, only priority = 1 signal', function() {
+      var result = computeBestAvailableScore({ priority: 'Normal', rubricTotal: 0 })
+      expect(result.signalCount).toBe(1)
+      expect(result.completenessMultiplier).toBe(0.5)
+      expect(result.score).toBe(20)
     })
 
-    it('tier + priority, no target version → two signals', function() {
-      var score = computeBestAvailableScore({ priority: 'Normal', rubricTotal: 0, tier: 'T1' })
-      expect(score).toBeGreaterThan(40)
+    it('tier + priority, no target version = 2 signals', function() {
+      var result = computeBestAvailableScore({ priority: 'Normal', rubricTotal: 0, tier: 'T1' })
+      expect(result.signalCount).toBe(2)
+      expect(result.score).toBeGreaterThan(20)
     })
   })
 
@@ -314,7 +460,47 @@ describe('computeBestAvailableScore', function() {
     it('RICE present drops rubric proxy', function() {
       var withRice = computeBestAvailableScore({ priority: 'Blocker', riceScore: 1690, tier: 'T1', rubricTotal: 8 })
       var withoutRice = computeBestAvailableScore({ priority: 'Blocker', riceScore: 1690, tier: 'T1', rubricTotal: 0 })
-      expect(withRice).toBe(withoutRice)
+      expect(withRice.score).toBe(withoutRice.score)
+    })
+  })
+
+  describe('completeness penalty', function() {
+    it('4 signals get no penalty (1.0x)', function() {
+      var result = computeBestAvailableScore(
+        { priority: 'Major', rubricTotal: 6, tier: 'T2', targetVersions: ['3.6'] },
+        ['3.6']
+      )
+      expect(result.signalCount).toBe(4)
+      expect(result.completenessMultiplier).toBe(1.0)
+      expect(result.score).toBe(result.rawScore)
+    })
+
+    it('fewer signals produce lower scores for same raw inputs', function() {
+      var four = computeBestAvailableScore(
+        { priority: 'Major', rubricTotal: 6, tier: 'T2', targetVersions: ['3.6'] },
+        ['3.6']
+      )
+      var two = computeBestAvailableScore(
+        { priority: 'Major', rubricTotal: 6 }
+      )
+      expect(four.score).toBeGreaterThan(two.score)
+    })
+
+    it('missing signals are listed in the missing array', function() {
+      var result = computeBestAvailableScore({ priority: 'Major' })
+      expect(result.missing).toContain('RICE Score')
+      expect(result.missing).toContain('Tier')
+      expect(result.missing).toContain('Target Version')
+    })
+
+    it('signal objects have name, value, weight, and raw', function() {
+      var result = computeBestAvailableScore({ priority: 'Major', rubricTotal: 6, tier: 'T1' })
+      for (var i = 0; i < result.signals.length; i++) {
+        expect(result.signals[i]).toHaveProperty('name')
+        expect(result.signals[i]).toHaveProperty('value')
+        expect(result.signals[i]).toHaveProperty('weight')
+        expect(result.signals[i]).toHaveProperty('raw')
+      }
     })
   })
 })
@@ -471,12 +657,12 @@ describe('buildFeatureReadiness', function() {
       expect(result.pendingReview).toEqual([])
       expect(result.ready).toEqual([])
       expect(result.filterMeta).toEqual({ components: [], priorities: [], bigRocks: [], targetVersions: [], fixVersions: [], teams: [] })
-      expect(result.meta).toEqual({ total: 0, pendingReviewCount: 0, readyCount: 0, versions: [], lastSyncedAt: null })
+      expect(result.meta).toEqual({ total: 0, pendingReviewCount: 0, readyCount: 0, versions: [], lastSyncedAt: null, jiraAvailable: false })
     })
 
-    it('returns empty buckets when features object is missing', function() {
+    it('returns empty buckets when no features with aiReview exist', function() {
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': { lastSyncedAt: '2026-01-01T00:00:00.000Z' }
+        ...convertToUnifiedFormat({ lastSyncedAt: '2026-01-01T00:00:00.000Z' })
       })
       var result = buildFeatureReadiness(readFromStorage)
       expect(result.pendingReview).toEqual([])
@@ -485,11 +671,16 @@ describe('buildFeatureReadiness', function() {
   })
 
   describe('gate logic — bucket assignment', function() {
-    it('humanReviewStatus approved → goes to approved bucket', function() {
+    it('humanReviewStatus approved with all gates → goes to ready bucket', function() {
       var store = makeFeaturesStore({
         'RHAISTRAT-1': { latest: makeLatest({ humanReviewStatus: 'approved' }) }
       })
-      var readFromStorage = makeReadFromStorage({ 'ai-impact/features.json': store })
+      var healthCache = { features: [{ key: 'RHAISTRAT-1', deliveryOwner: 'Alice', pmOwner: 'Jane', targetRelease: 'rhoai-3.6', priorityScore: null }] }
+      var readFromStorage = makeReadFromStorage({
+        ...convertToUnifiedFormat(store),
+        'releases/planning/config.json': CONFIG_3_6,
+        'releases/planning/health-cache-3.6-all.json': healthCache
+      })
       var result = buildFeatureReadiness(readFromStorage)
       expect(result.ready).toHaveLength(1)
       expect(result.ready[0].key).toBe('RHAISTRAT-1')
@@ -500,7 +691,7 @@ describe('buildFeatureReadiness', function() {
       var store = makeFeaturesStore({
         'RHAISTRAT-1': { latest: makeLatest({ humanReviewStatus: 'awaiting-review' }) }
       })
-      var readFromStorage = makeReadFromStorage({ 'ai-impact/features.json': store })
+      var readFromStorage = makeReadFromStorage({ ...convertToUnifiedFormat(store) })
       var result = buildFeatureReadiness(readFromStorage)
       expect(result.pendingReview).toHaveLength(1)
       expect(result.ready).toHaveLength(0)
@@ -510,7 +701,7 @@ describe('buildFeatureReadiness', function() {
       var store = makeFeaturesStore({
         'RHAISTRAT-1': { latest: makeLatest({ humanReviewStatus: 'needs-review' }) }
       })
-      var readFromStorage = makeReadFromStorage({ 'ai-impact/features.json': store })
+      var readFromStorage = makeReadFromStorage({ ...convertToUnifiedFormat(store) })
       var result = buildFeatureReadiness(readFromStorage)
       expect(result.pendingReview).toHaveLength(1)
       expect(result.ready).toHaveLength(0)
@@ -520,7 +711,7 @@ describe('buildFeatureReadiness', function() {
       var store = makeFeaturesStore({
         'RHAISTRAT-1': { latest: makeLatest({ humanReviewStatus: null }) }
       })
-      var readFromStorage = makeReadFromStorage({ 'ai-impact/features.json': store })
+      var readFromStorage = makeReadFromStorage({ ...convertToUnifiedFormat(store) })
       var result = buildFeatureReadiness(readFromStorage)
       expect(result.pendingReview).toHaveLength(1)
       expect(result.ready).toHaveLength(0)
@@ -531,10 +722,11 @@ describe('buildFeatureReadiness', function() {
         'RHAISTRAT-1': { latest: makeLatest({ humanReviewStatus: 'approved' }) },
         'RHAISTRAT-2': {}
       })
-      var readFromStorage = makeReadFromStorage({ 'ai-impact/features.json': store })
+      var readFromStorage = makeReadFromStorage({ ...convertToUnifiedFormat(store) })
       var result = buildFeatureReadiness(readFromStorage)
-      expect(result.ready).toHaveLength(1)
-      expect(result.pendingReview).toHaveLength(0)
+      var allFeatures = result.pendingReview.concat(result.ready)
+      expect(allFeatures).toHaveLength(1)
+      expect(allFeatures[0].key).toBe('RHAISTRAT-1')
     })
   })
 
@@ -544,12 +736,14 @@ describe('buildFeatureReadiness', function() {
         'RHAISTRAT-1': { latest: makeLatest({ humanReviewStatus: 'approved' }) }
       })
       var candidateCache = {
-        data: { features: [{ issueKey: 'RHAISTRAT-1', tier: 1, fixVersion: '3.6.0' }] }
+        data: { features: [{ issueKey: 'RHAISTRAT-1', tier: 1, fixVersion: '3.6.0', targetRelease: 'rhoai-3.6' }] }
       }
+      var healthCache = { features: [{ key: 'RHAISTRAT-1', deliveryOwner: 'Alice', pmOwner: 'Jane', priorityScore: null }] }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
-        'releases/planning/candidates-cache-3.6.json': candidateCache
+        'releases/planning/candidates-cache-3.6.json': candidateCache,
+        'releases/planning/health-cache-3.6-all.json': healthCache
       })
       var result = buildFeatureReadiness(readFromStorage)
       expect(result.ready[0].confidence).toBe('committed')
@@ -559,7 +753,12 @@ describe('buildFeatureReadiness', function() {
       var store = makeFeaturesStore({
         'RHAISTRAT-1': { latest: makeLatest({ humanReviewStatus: 'approved' }) }
       })
-      var readFromStorage = makeReadFromStorage({ 'ai-impact/features.json': store })
+      var healthCache = { features: [{ key: 'RHAISTRAT-1', deliveryOwner: 'Alice', pmOwner: 'Jane', targetRelease: 'rhoai-3.6', priorityScore: null }] }
+      var readFromStorage = makeReadFromStorage({
+        ...convertToUnifiedFormat(store),
+        'releases/planning/config.json': CONFIG_3_6,
+        'releases/planning/health-cache-3.6-all.json': healthCache
+      })
       var result = buildFeatureReadiness(readFromStorage)
       expect(result.ready[0].confidence).toBe('ready')
     })
@@ -568,7 +767,7 @@ describe('buildFeatureReadiness', function() {
       var store = makeFeaturesStore({
         'RHAISTRAT-1': { latest: makeLatest({ humanReviewStatus: null }) }
       })
-      var readFromStorage = makeReadFromStorage({ 'ai-impact/features.json': store })
+      var readFromStorage = makeReadFromStorage({ ...convertToUnifiedFormat(store) })
       var result = buildFeatureReadiness(readFromStorage)
       expect(result.pendingReview[0].confidence).toBe('not-ready')
     })
@@ -579,10 +778,11 @@ describe('buildFeatureReadiness', function() {
       var store = makeFeaturesStore({
         'RHAISTRAT-1': { latest: makeLatest({ humanReviewStatus: 'approved' }) }
       })
-      var readFromStorage = makeReadFromStorage({ 'ai-impact/features.json': store })
+      var readFromStorage = makeReadFromStorage({ ...convertToUnifiedFormat(store) })
       var result = buildFeatureReadiness(readFromStorage)
-      expect(result.ready[0].readinessGates).toBeDefined()
-      expect(result.ready[0].readinessGates.noBlockingViolations).toBe(true)
+      var feat = result.pendingReview.concat(result.ready).find(function(f) { return f.key === 'RHAISTRAT-1' })
+      expect(feat.readinessGates).toBeDefined()
+      expect(feat.readinessGates.noBlockingViolations).toBe(true)
     })
 
     it('health-pipeline features have readinessGates with noBlockingViolations', function() {
@@ -594,12 +794,12 @@ describe('buildFeatureReadiness', function() {
         }]
       }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         'releases/planning/health-cache-3.6-all.json': healthCache
       })
       var result = buildFeatureReadiness(readFromStorage)
-      var feat = result.ready[0]
+      var feat = result.pendingReview[0]
       expect(feat.readinessGates.noBlockingViolations).toBe(true)
     })
   })
@@ -613,9 +813,9 @@ describe('buildFeatureReadiness', function() {
       var hygieneCache = {
         features: { 'RHAISTRAT-1': { key: 'RHAISTRAT-1', team: 'Alpha', violations: violations } }
       }
-      var healthCache = { features: [{ key: 'RHAISTRAT-1', priorityScore: null }] }
+      var healthCache = { features: [{ key: 'RHAISTRAT-1', deliveryOwner: 'Alice', pmOwner: 'Jane', targetRelease: 'rhoai-3.6', priorityScore: null }] }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         'releases/planning/health-cache-3.6-all.json': healthCache,
         'releases/hygiene/features-3.6.json': hygieneCache
@@ -634,7 +834,7 @@ describe('buildFeatureReadiness', function() {
       }
       var healthCache = { features: [{ key: 'RHAISTRAT-1', priorityScore: null }] }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         'releases/planning/health-cache-3.6-all.json': healthCache,
         'releases/hygiene/features-3.6.json': hygieneCache
@@ -653,9 +853,9 @@ describe('buildFeatureReadiness', function() {
       var hygieneCache = {
         features: { 'RHAISTRAT-1': { key: 'RHAISTRAT-1', team: 'Alpha', violations: violations } }
       }
-      var healthCache = { features: [{ key: 'RHAISTRAT-1', priorityScore: null }] }
+      var healthCache = { features: [{ key: 'RHAISTRAT-1', deliveryOwner: 'Alice', pmOwner: 'Jane', targetRelease: 'rhoai-3.6', priorityScore: null }] }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         'releases/planning/health-cache-3.6-all.json': healthCache,
         'releases/hygiene/features-3.6.json': hygieneCache
@@ -678,7 +878,7 @@ describe('buildFeatureReadiness', function() {
         features: { 'AIPCC-100': { key: 'AIPCC-100', team: 'Beta', violations: violations } }
       }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         'releases/planning/health-cache-3.6-all.json': healthCache,
         'releases/hygiene/features-3.6.json': hygieneCache
@@ -695,10 +895,12 @@ describe('buildFeatureReadiness', function() {
         'RHAISTRAT-LOW': { latest: makeLatest({ humanReviewStatus: 'approved', priority: 'Minor', scores: { feasibility: 1, testability: 1, scope: 1, architecture: 1 } }) },
         'RHAISTRAT-HIGH': { latest: makeLatest({ humanReviewStatus: 'approved', priority: 'Blocker', scores: { feasibility: 2, testability: 2, scope: 2, architecture: 2 } }) }
       })
-      var readFromStorage = makeReadFromStorage({ 'ai-impact/features.json': store })
+      var readFromStorage = makeReadFromStorage({ ...convertToUnifiedFormat(store) })
       var result = buildFeatureReadiness(readFromStorage)
-      expect(result.ready[0].key).toBe('RHAISTRAT-HIGH')
-      expect(result.ready[1].key).toBe('RHAISTRAT-LOW')
+      var all = result.pendingReview.concat(result.ready)
+      var highIdx = all.findIndex(function(f) { return f.key === 'RHAISTRAT-HIGH' })
+      var lowIdx = all.findIndex(function(f) { return f.key === 'RHAISTRAT-LOW' })
+      expect(highIdx).toBeLessThan(lowIdx)
     })
 
     it('higher rubric score → higher effectivePriorityScore → appears first', function() {
@@ -706,10 +908,11 @@ describe('buildFeatureReadiness', function() {
         'RHAISTRAT-LOWTOTAL': { latest: makeLatest({ key: 'RHAISTRAT-LOWTOTAL', humanReviewStatus: 'approved', priority: 'Normal', scores: { feasibility: 1, testability: 1, scope: 1, architecture: 1 } }) },
         'RHAISTRAT-HIGHTOTAL': { latest: makeLatest({ key: 'RHAISTRAT-HIGHTOTAL', humanReviewStatus: 'approved', priority: 'Normal', scores: { feasibility: 2, testability: 2, scope: 2, architecture: 2 } }) }
       })
-      var readFromStorage = makeReadFromStorage({ 'ai-impact/features.json': store })
+      var readFromStorage = makeReadFromStorage({ ...convertToUnifiedFormat(store) })
       var result = buildFeatureReadiness(readFromStorage)
-      var highIdx = result.ready.findIndex(function(f) { return f.key === 'RHAISTRAT-HIGHTOTAL' })
-      var lowIdx = result.ready.findIndex(function(f) { return f.key === 'RHAISTRAT-LOWTOTAL' })
+      var all = result.pendingReview.concat(result.ready)
+      var highIdx = all.findIndex(function(f) { return f.key === 'RHAISTRAT-HIGHTOTAL' })
+      var lowIdx = all.findIndex(function(f) { return f.key === 'RHAISTRAT-LOWTOTAL' })
       expect(highIdx).toBeLessThan(lowIdx)
     })
   })
@@ -720,7 +923,7 @@ describe('buildFeatureReadiness', function() {
         'RHAISTRAT-LOW': { latest: makeLatest({ key: 'RHAISTRAT-LOW', humanReviewStatus: null, priority: 'Minor', scores: { feasibility: 0, testability: 0, scope: 0, architecture: 0 } }) },
         'RHAISTRAT-HIGH': { latest: makeLatest({ key: 'RHAISTRAT-HIGH', humanReviewStatus: null, priority: 'Blocker', scores: { feasibility: 0, testability: 0, scope: 0, architecture: 0 } }) }
       })
-      var readFromStorage = makeReadFromStorage({ 'ai-impact/features.json': store })
+      var readFromStorage = makeReadFromStorage({ ...convertToUnifiedFormat(store) })
       var result = buildFeatureReadiness(readFromStorage)
       expect(result.pendingReview[0].key).toBe('RHAISTRAT-HIGH')
       expect(result.pendingReview[1].key).toBe('RHAISTRAT-LOW')
@@ -731,7 +934,7 @@ describe('buildFeatureReadiness', function() {
         'RHAISTRAT-A': { latest: makeLatest({ key: 'RHAISTRAT-A', humanReviewStatus: null, priority: 'Normal', size: null, scores: { feasibility: 2, testability: 1, scope: 0, architecture: 0 } }) },
         'RHAISTRAT-B': { latest: makeLatest({ key: 'RHAISTRAT-B', humanReviewStatus: null, priority: 'Normal', size: null, scores: { feasibility: 1, testability: 0, scope: 0, architecture: 0 } }) }
       })
-      var readFromStorage = makeReadFromStorage({ 'ai-impact/features.json': store })
+      var readFromStorage = makeReadFromStorage({ ...convertToUnifiedFormat(store) })
       var result = buildFeatureReadiness(readFromStorage)
       expect(result.pendingReview[0].key).toBe('RHAISTRAT-A')
     })
@@ -748,7 +951,7 @@ describe('buildFeatureReadiness', function() {
         ]
       }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         'releases/planning/health-cache-3.6-all.json': healthCache
       })
@@ -773,10 +976,12 @@ describe('buildFeatureReadiness', function() {
           ]
         }
       }
+      var healthCache = { features: [{ key: 'RHAISTRAT-1', deliveryOwner: 'Alice', pmOwner: 'Jane', priorityScore: null }] }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
-        [candidatesKey]: candidateCache
+        [candidatesKey]: candidateCache,
+        'releases/planning/health-cache-3.6-all.json': healthCache
       })
       var result = buildFeatureReadiness(readFromStorage)
       var f = result.ready[0]
@@ -797,13 +1002,13 @@ describe('buildFeatureReadiness', function() {
         features: [{ key: 'RHAISTRAT-1', priorityScore: null }]
       }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         [candidatesKey]: candidateCache,
         'releases/planning/health-cache-3.6-all.json': healthCache
       })
       var result = buildFeatureReadiness(readFromStorage)
-      var f = result.ready[0]
+      var f = result.pendingReview.concat(result.ready).find(function(feat) { return feat.key === 'RHAISTRAT-1' })
       expect(f.tier).toBeNull()
       expect(f.bigRock).toBeNull()
       expect(f.targetVersions).toEqual([])
@@ -818,12 +1023,13 @@ describe('buildFeatureReadiness', function() {
         data: { features: [{ issueKey: 'RHAISTRAT-1', tier: 2 }] }
       }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         [candidatesKey]: candidateCache
       })
       var result = buildFeatureReadiness(readFromStorage)
-      expect(result.ready[0].tier).toBe('T2')
+      var feat = result.pendingReview.concat(result.ready).find(function(f) { return f.key === 'RHAISTRAT-1' })
+      expect(feat.tier).toBe('T2')
     })
   })
 
@@ -833,11 +1039,11 @@ describe('buildFeatureReadiness', function() {
         'RHAISTRAT-1': { latest: makeLatest({ humanReviewStatus: 'approved' }) }
       })
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6
       })
       var result = buildFeatureReadiness(readFromStorage)
-      expect(result.ready).toHaveLength(1)
+      expect(result.pendingReview.concat(result.ready)).toHaveLength(1)
     })
 
     it('includes all features when no releases are configured', function() {
@@ -845,10 +1051,10 @@ describe('buildFeatureReadiness', function() {
         'RHAISTRAT-1': { latest: makeLatest({ humanReviewStatus: 'approved' }) }
       })
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store
+        ...convertToUnifiedFormat(store)
       })
       var result = buildFeatureReadiness(readFromStorage)
-      expect(result.ready).toHaveLength(1)
+      expect(result.pendingReview.concat(result.ready)).toHaveLength(1)
     })
 
     it('falls back to health cache for tier, bigRock, targetVersions, fixVersion when candidates cache is absent', function() {
@@ -863,11 +1069,12 @@ describe('buildFeatureReadiness', function() {
           targetRelease: 'rhoai-3.6',
           fixVersions: '3.6.0',
           deliveryOwner: 'Jane Smith',
+          pmOwner: 'Jane PM',
           priorityScore: null
         }]
       }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         'releases/planning/health-cache-3.6-all.json': healthCache
       })
@@ -888,10 +1095,10 @@ describe('buildFeatureReadiness', function() {
         data: { features: [{ issueKey: 'RHAISTRAT-1', tier: 1, bigRock: 'AI Speed', targetRelease: 'rhoai-3.6-cand', fixVersion: '3.6.0-cand' }] }
       }
       var healthCache = {
-        features: [{ key: 'RHAISTRAT-1', tier: 'T3', bigRock: 'Platform', targetRelease: 'rhoai-3.6-health', fixVersions: '3.6.0-health', priorityScore: null }]
+        features: [{ key: 'RHAISTRAT-1', tier: 'T3', bigRock: 'Platform', targetRelease: 'rhoai-3.6-health', fixVersions: '3.6.0-health', deliveryOwner: 'Alice', pmOwner: 'Jane', priorityScore: null }]
       }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         'releases/planning/candidates-cache-3.6.json': candidateCache,
         'releases/planning/health-cache-3.6-all.json': healthCache
@@ -909,10 +1116,10 @@ describe('buildFeatureReadiness', function() {
         'RHAISTRAT-1': { latest: makeLatest({ humanReviewStatus: 'approved', components: [] }) }
       })
       var healthCache = {
-        features: [{ key: 'RHAISTRAT-1', components: 'Serving, Training', priorityScore: null }]
+        features: [{ key: 'RHAISTRAT-1', components: 'Serving, Training', deliveryOwner: 'Alice', pmOwner: 'Jane', targetRelease: 'rhoai-3.6', priorityScore: null }]
       }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         'releases/planning/health-cache-3.6-all.json': healthCache
       })
@@ -929,10 +1136,10 @@ describe('buildFeatureReadiness', function() {
         'RHAISTRAT-1': { latest: makeLatest({ humanReviewStatus: 'approved' }) }
       })
       var healthCache = {
-        features: [{ key: 'RHAISTRAT-1', priorityScore: 87, priorityBreakdown: { rice: 50, bigRock: 100 } }]
+        features: [{ key: 'RHAISTRAT-1', priorityScore: 87, priorityBreakdown: { rice: 50, bigRock: 100 }, deliveryOwner: 'Alice', pmOwner: 'Jane', targetRelease: 'rhoai-3.6' }]
       }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         [healthKey]: healthCache
       })
@@ -954,33 +1161,36 @@ describe('buildFeatureReadiness', function() {
         features: [{ key: 'RHAISTRAT-999', priorityScore: 50 }]
       }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         'releases/planning/candidates-cache-3.6.json': candidateCache,
         [healthKey]: healthCache
       })
       var result = buildFeatureReadiness(readFromStorage)
-      var f = result.ready[0]
+      var f = result.pendingReview.concat(result.ready).find(function(feat) { return feat.key === 'RHAISTRAT-1' })
       expect(f.priorityScore).toBeNull()
       expect(f.priorityScoreFallback).toBe(true)
       expect(f.effectivePriorityScore).toBeGreaterThan(0)
     })
 
-    it('health cache with priorityBreakdown is reflected in priorityScoreBreakdown', function() {
+    it('priorityScoreBreakdown always has signals array for popover rendering', function() {
       var store = makeFeaturesStore({
         'RHAISTRAT-1': { latest: makeLatest({ humanReviewStatus: 'approved' }) }
       })
-      var breakdown = { rice: 60, bigRock: 80, priority: 70, complexity: 50 }
       var healthCache = {
-        features: [{ key: 'RHAISTRAT-1', priorityScore: 70, priorityBreakdown: breakdown }]
+        features: [{ key: 'RHAISTRAT-1', priorityScore: 70, priorityBreakdown: { rice: 60 }, deliveryOwner: 'Alice', pmOwner: 'Jane', targetRelease: 'rhoai-3.6' }]
       }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         [healthKey]: healthCache
       })
       var result = buildFeatureReadiness(readFromStorage)
-      expect(result.ready[0].priorityScoreBreakdown).toEqual(breakdown)
+      var bd = result.ready[0].priorityScoreBreakdown
+      expect(bd.signals).toBeDefined()
+      expect(bd.signals.length).toBeGreaterThan(0)
+      expect(bd.score).toBeGreaterThan(0)
+      expect(result.ready[0].effectivePriorityScore).toBe(70)
     })
   })
 
@@ -999,7 +1209,7 @@ describe('buildFeatureReadiness', function() {
         }
       }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         'releases/planning/candidates-cache-3.6.json': candidateCache
       })
@@ -1030,7 +1240,7 @@ describe('buildFeatureReadiness', function() {
         }
       }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         'releases/planning/health-cache-3.6-all.json': healthCache,
         'releases/hygiene/features-3.6.json': hygieneCache
@@ -1043,10 +1253,10 @@ describe('buildFeatureReadiness', function() {
       var store = makeFeaturesStore({
         'RHAISTRAT-1': { latest: makeLatest({ humanReviewStatus: 'approved' }) }
       })
-      var healthCache = { features: [{ key: 'RHAISTRAT-1', deliveryOwner: 'wrong-owner', priorityScore: null }] }
+      var healthCache = { features: [{ key: 'RHAISTRAT-1', deliveryOwner: 'wrong-owner', pmOwner: 'Jane', targetRelease: 'rhoai-3.6', priorityScore: null }] }
       var hygieneCache = { features: { 'RHAISTRAT-1': { key: 'RHAISTRAT-1', team: 'Real Team' } } }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         'releases/planning/health-cache-3.6-all.json': healthCache,
         'releases/hygiene/features-3.6.json': hygieneCache
@@ -1066,13 +1276,13 @@ describe('buildFeatureReadiness', function() {
       })
       var healthCache = {
         features: [
-          { key: 'RHAISTRAT-1', priorityScore: null },
+          { key: 'RHAISTRAT-1', deliveryOwner: 'Alice', pmOwner: 'Jane', targetRelease: 'rhoai-3.6', priorityScore: null },
           { key: 'RHAISTRAT-2', priorityScore: null },
           { key: 'RHAISTRAT-3', priorityScore: null }
         ]
       }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         'releases/planning/health-cache-3.6-all.json': healthCache
       })
@@ -1087,7 +1297,7 @@ describe('buildFeatureReadiness', function() {
       var store = makeFeaturesStore({
         'RHAISTRAT-1': { latest: makeLatest({ humanReviewStatus: 'approved' }) }
       })
-      var readFromStorage = makeReadFromStorage({ 'ai-impact/features.json': store })
+      var readFromStorage = makeReadFromStorage({ ...convertToUnifiedFormat(store) })
       var result = buildFeatureReadiness(readFromStorage)
       expect(result.meta.versions).toEqual([])
     })
@@ -1102,9 +1312,10 @@ describe('buildFeatureReadiness', function() {
           scores: { feasibility: 3, testability: 2, scope: 1, architecture: 2 }
         }) }
       })
-      var readFromStorage = makeReadFromStorage({ 'ai-impact/features.json': store })
+      var readFromStorage = makeReadFromStorage({ ...convertToUnifiedFormat(store) })
       var result = buildFeatureReadiness(readFromStorage)
-      expect(result.ready[0].rubricTotal).toBe(8)
+      var feat = result.pendingReview.concat(result.ready).find(function(f) { return f.key === 'RHAISTRAT-1' })
+      expect(feat.rubricTotal).toBe(8)
     })
 
     it('treats missing score dimensions as 0', function() {
@@ -1114,9 +1325,10 @@ describe('buildFeatureReadiness', function() {
           scores: { feasibility: 2 }
         }) }
       })
-      var readFromStorage = makeReadFromStorage({ 'ai-impact/features.json': store })
+      var readFromStorage = makeReadFromStorage({ ...convertToUnifiedFormat(store) })
       var result = buildFeatureReadiness(readFromStorage)
-      expect(result.ready[0].rubricTotal).toBe(2)
+      var feat = result.pendingReview.concat(result.ready).find(function(f) { return f.key === 'RHAISTRAT-1' })
+      expect(feat.rubricTotal).toBe(2)
     })
   })
 
@@ -1129,14 +1341,22 @@ describe('buildFeatureReadiness', function() {
       var healthCache = {
         features: [{ key: 'RHAISTRAT-IN', priorityScore: 80 }]
       }
+      var inOnly = convertToUnifiedFormat(store)
+      delete inOnly['releases/execution/features/RHAISTRAT-OUT.json']
+      var idx = inOnly['releases/execution/index.json']
+      if (idx && idx.features) {
+        idx.features = idx.features.filter(function(f) { return f.key !== 'RHAISTRAT-OUT' })
+        idx.featureCount = idx.features.length
+      }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...inOnly,
         'releases/planning/config.json': CONFIG_3_6,
         'releases/planning/health-cache-3.6-all.json': healthCache
       })
       var result = buildFeatureReadiness(readFromStorage)
-      expect(result.ready).toHaveLength(1)
-      expect(result.ready[0].key).toBe('RHAISTRAT-IN')
+      var allFeatures = result.pendingReview.concat(result.ready)
+      expect(allFeatures).toHaveLength(1)
+      expect(allFeatures[0].key).toBe('RHAISTRAT-IN')
     })
 
     it('includes all features when no configured releases exist', function() {
@@ -1144,10 +1364,9 @@ describe('buildFeatureReadiness', function() {
         'RHAISTRAT-1': { latest: makeLatest({ humanReviewStatus: 'approved' }) },
         'RHAISTRAT-2': { latest: makeLatest({ key: 'RHAISTRAT-2', humanReviewStatus: null }) }
       })
-      var readFromStorage = makeReadFromStorage({ 'ai-impact/features.json': store })
+      var readFromStorage = makeReadFromStorage({ ...convertToUnifiedFormat(store) })
       var result = buildFeatureReadiness(readFromStorage)
-      expect(result.ready).toHaveLength(1)
-      expect(result.pendingReview).toHaveLength(1)
+      expect(result.pendingReview.concat(result.ready)).toHaveLength(2)
     })
   })
 
@@ -1159,10 +1378,10 @@ describe('buildFeatureReadiness', function() {
       })
       var config = { releases: { '3.5': { release: '3.5' }, '3.6': { release: '3.6' } } }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': config,
-        'releases/planning/health-cache-3.5-all.json': { features: [{ key: 'RHAISTRAT-1', priorityScore: 80 }] },
-        'releases/planning/health-cache-3.6-all.json': { features: [{ key: 'RHAISTRAT-2', priorityScore: 60 }] }
+        'releases/planning/health-cache-3.5-all.json': { features: [{ key: 'RHAISTRAT-1', deliveryOwner: 'Alice', pmOwner: 'Jane', targetRelease: 'rhoai-3.5', priorityScore: 80 }] },
+        'releases/planning/health-cache-3.6-all.json': { features: [{ key: 'RHAISTRAT-2', deliveryOwner: 'Bob', pmOwner: 'Jane', targetRelease: 'rhoai-3.6', priorityScore: 60 }] }
       })
       var result = buildFeatureReadiness(readFromStorage)
       expect(result.ready).toHaveLength(2)
@@ -1175,15 +1394,16 @@ describe('buildFeatureReadiness', function() {
       })
       var config = { releases: { '3.5': { release: '3.5' }, '3.6': { release: '3.6' } } }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': config,
         'releases/planning/candidates-cache-3.5.json': { data: { features: [{ issueKey: 'RHAISTRAT-1', tier: 1, bigRock: 'First' }] } },
         'releases/planning/candidates-cache-3.6.json': { data: { features: [{ issueKey: 'RHAISTRAT-1', tier: 2, bigRock: 'Second' }] } }
       })
       var result = buildFeatureReadiness(readFromStorage)
-      expect(result.ready).toHaveLength(1)
-      expect(result.ready[0].tier).toBe('T1')
-      expect(result.ready[0].bigRock).toBe('First')
+      var allFeatures = result.pendingReview.concat(result.ready)
+      expect(allFeatures).toHaveLength(1)
+      expect(allFeatures[0].tier).toBe('T1')
+      expect(allFeatures[0].bigRock).toBe('First')
     })
 
     it('meta.versions reflects all configured release versions', function() {
@@ -1192,7 +1412,7 @@ describe('buildFeatureReadiness', function() {
       })
       var config = { releases: { '3.4': { release: '3.4' }, '3.5': { release: '3.5' }, '3.6': { release: '3.6' } } }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': config
       })
       var result = buildFeatureReadiness(readFromStorage)
@@ -1201,54 +1421,92 @@ describe('buildFeatureReadiness', function() {
   })
 
   // -------------------------------------------------------------------------
-  // isHealthFeatureReady
+  // computeReadiness
   // -------------------------------------------------------------------------
 
-  describe('isHealthFeatureReady', function() {
-    it('returns true when all four gates pass', function() {
-      var hd = { deliveryOwner: 'Alice', blockerCount: 0, status: 'In Progress', targetRelease: 'rhoai-3.6' }
-      expect(isHealthFeatureReady(hd, null)).toBe(true)
+  describe('computeReadiness', function() {
+    function readyFeature(overrides) {
+      return Object.assign({
+        humanReviewStatus: 'approved',
+        rubricTotal: 4,
+        pmOwner: 'Jane',
+        deliveryOwner: 'Alice',
+        status: 'In Progress',
+        targetVersions: ['rhoai-3.6'],
+        violations: null
+      }, overrides)
+    }
+
+    it('returns isReady=true when all seven gates pass', function() {
+      var result = computeReadiness(readyFeature())
+      expect(result.isReady).toBe(true)
+      expect(result.gates.isApproved).toBe(true)
+      expect(result.gates.hasRubric).toBe(true)
+      expect(result.gates.pmAssigned).toBe(true)
+      expect(result.gates.deliveryOwnerAssigned).toBe(true)
+      expect(result.gates.pastRefinement).toBe(true)
+      expect(result.gates.hasTargetVersion).toBe(true)
+      expect(result.gates.noBlockingViolations).toBe(true)
     })
 
-    it('returns false when owner is missing', function() {
-      var hd = { deliveryOwner: null, assignee: null, blockerCount: 0, status: 'In Progress', targetRelease: 'rhoai-3.6' }
-      expect(isHealthFeatureReady(hd, null)).toBe(false)
+    it('returns isReady=false when not approved', function() {
+      var result = computeReadiness(readyFeature({ humanReviewStatus: 'awaiting-review' }))
+      expect(result.isReady).toBe(false)
+      expect(result.gates.isApproved).toBe(false)
     })
 
-    it('returns true when assignee is set but deliveryOwner is not', function() {
-      var hd = { deliveryOwner: null, assignee: 'Bob', blockerCount: 0, status: 'In Progress', targetRelease: 'rhoai-3.6' }
-      expect(isHealthFeatureReady(hd, null)).toBe(true)
+    it('returns isReady=false when rubricTotal is 0', function() {
+      var result = computeReadiness(readyFeature({ rubricTotal: 0 }))
+      expect(result.isReady).toBe(false)
+      expect(result.gates.hasRubric).toBe(false)
     })
 
-    it('returns false when there are blockers', function() {
-      var hd = { deliveryOwner: 'Alice', blockerCount: 2, status: 'In Progress', targetRelease: 'rhoai-3.6' }
-      expect(isHealthFeatureReady(hd, null)).toBe(false)
+    it('returns isReady=false when pmOwner is null', function() {
+      var result = computeReadiness(readyFeature({ pmOwner: null }))
+      expect(result.isReady).toBe(false)
+      expect(result.gates.pmAssigned).toBe(false)
     })
 
-    it('returns false when status is New', function() {
-      var hd = { deliveryOwner: 'Alice', blockerCount: 0, status: 'New', targetRelease: 'rhoai-3.6' }
-      expect(isHealthFeatureReady(hd, null)).toBe(false)
+    it('returns isReady=false when deliveryOwner is null', function() {
+      var result = computeReadiness(readyFeature({ deliveryOwner: null }))
+      expect(result.isReady).toBe(false)
+      expect(result.gates.deliveryOwnerAssigned).toBe(false)
     })
 
-    it('returns false when status is Refinement', function() {
-      var hd = { deliveryOwner: 'Alice', blockerCount: 0, status: 'Refinement', targetRelease: 'rhoai-3.6' }
-      expect(isHealthFeatureReady(hd, null)).toBe(false)
+    it('returns isReady=false when status is New', function() {
+      var result = computeReadiness(readyFeature({ status: 'New' }))
+      expect(result.isReady).toBe(false)
+      expect(result.gates.pastRefinement).toBe(false)
     })
 
-    it('returns false when status is null', function() {
-      var hd = { deliveryOwner: 'Alice', blockerCount: 0, status: null, targetRelease: 'rhoai-3.6' }
-      expect(isHealthFeatureReady(hd, null)).toBe(false)
+    it('returns isReady=false when status is Refinement', function() {
+      var result = computeReadiness(readyFeature({ status: 'Refinement' }))
+      expect(result.isReady).toBe(false)
+      expect(result.gates.pastRefinement).toBe(false)
     })
 
-    it('returns false when no target version', function() {
-      var hd = { deliveryOwner: 'Alice', blockerCount: 0, status: 'In Progress', targetRelease: null }
-      expect(isHealthFeatureReady(hd, null)).toBe(false)
+    it('returns isReady=false when status is null', function() {
+      var result = computeReadiness(readyFeature({ status: null }))
+      expect(result.isReady).toBe(false)
+      expect(result.gates.pastRefinement).toBe(false)
     })
 
-    it('uses candidate targetRelease when health data lacks it', function() {
-      var hd = { deliveryOwner: 'Alice', blockerCount: 0, status: 'In Progress', targetRelease: null }
-      var cd = { targetRelease: 'rhoai-3.6' }
-      expect(isHealthFeatureReady(hd, cd)).toBe(true)
+    it('returns isReady=false when targetVersions is empty', function() {
+      var result = computeReadiness(readyFeature({ targetVersions: [] }))
+      expect(result.isReady).toBe(false)
+      expect(result.gates.hasTargetVersion).toBe(false)
+    })
+
+    it('returns isReady=false when blocking violations exist', function() {
+      var result = computeReadiness(readyFeature({ violations: [{ id: 'missing-fix-version' }] }))
+      expect(result.isReady).toBe(false)
+      expect(result.gates.noBlockingViolations).toBe(false)
+    })
+
+    it('non-blocking violations do not fail the gate', function() {
+      var result = computeReadiness(readyFeature({ violations: [{ id: 'stale-status-summary' }] }))
+      expect(result.isReady).toBe(true)
+      expect(result.gates.noBlockingViolations).toBe(true)
     })
   })
 
@@ -1263,7 +1521,7 @@ describe('buildFeatureReadiness', function() {
         features: [{ key: 'AIPCC-100', summary: 'AIPCC Feature', status: 'In Progress', priority: 'Major', deliveryOwner: 'Alice', blockerCount: 0, targetRelease: 'rhoai-3.6' }]
       }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         'releases/planning/health-cache-3.6-all.json': healthCache
       })
@@ -1276,7 +1534,7 @@ describe('buildFeatureReadiness', function() {
       expect(feat.rubricTotal).toBe(0)
     })
 
-    it('health-pipeline feature with all gates passing goes to ready', function() {
+    it('health-pipeline feature always goes to pendingReview (no approval/rubric)', function() {
       var store = makeFeaturesStore({})
       var healthCache = {
         features: [{
@@ -1285,13 +1543,13 @@ describe('buildFeatureReadiness', function() {
         }]
       }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         'releases/planning/health-cache-3.6-all.json': healthCache
       })
       var result = buildFeatureReadiness(readFromStorage)
-      expect(result.ready).toHaveLength(1)
-      expect(result.ready[0].key).toBe('AIPCC-200')
+      expect(result.pendingReview).toHaveLength(1)
+      expect(result.pendingReview[0].key).toBe('AIPCC-200')
     })
 
     it('health-pipeline feature missing owner goes to pendingReview', function() {
@@ -1303,7 +1561,7 @@ describe('buildFeatureReadiness', function() {
         }]
       }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         'releases/planning/health-cache-3.6-all.json': healthCache
       })
@@ -1317,10 +1575,10 @@ describe('buildFeatureReadiness', function() {
         'RHAISTRAT-1': { latest: makeLatest({ humanReviewStatus: 'approved' }) }
       })
       var healthCache = {
-        features: [{ key: 'RHAISTRAT-1', priorityScore: 70 }]
+        features: [{ key: 'RHAISTRAT-1', deliveryOwner: 'Alice', pmOwner: 'Jane', targetRelease: 'rhoai-3.6', priorityScore: 70 }]
       }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         'releases/planning/health-cache-3.6-all.json': healthCache
       })
@@ -1339,7 +1597,7 @@ describe('buildFeatureReadiness', function() {
         ]
       }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         'releases/planning/health-cache-3.6-all.json': healthCache
       })
@@ -1361,12 +1619,12 @@ describe('buildFeatureReadiness', function() {
         }]
       }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         'releases/planning/health-cache-3.6-all.json': healthCache
       })
       var result = buildFeatureReadiness(readFromStorage)
-      var feat = result.ready[0]
+      var feat = result.pendingReview[0]
       expect(feat.effectivePriorityScore).toBe(85)
       expect(feat.priorityScoreFallback).toBe(false)
     })
@@ -1384,13 +1642,13 @@ describe('buildFeatureReadiness', function() {
         data: { features: [{ issueKey: 'AIPCC-600', tier: 1 }] }
       }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         'releases/planning/health-cache-3.6-all.json': healthCache,
         'releases/planning/candidates-cache-3.6.json': candidateCache
       })
       var result = buildFeatureReadiness(readFromStorage)
-      var feat = result.ready[0]
+      var feat = result.pendingReview[0]
       expect(feat.priorityScoreFallback).toBe(true)
       expect(feat.effectivePriorityScore).toBeGreaterThan(0)
     })
@@ -1404,20 +1662,21 @@ describe('buildFeatureReadiness', function() {
         }]
       }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         'releases/planning/health-cache-3.6-all.json': healthCache
       })
       var result = buildFeatureReadiness(readFromStorage)
       var feat = result.pendingReview[0]
-      expect(feat.readinessGates.ownerAssigned).toBe(true)
-      expect(feat.readinessGates.notBlocked).toBe(false)
+      expect(feat.readinessGates.isApproved).toBe(false)
+      expect(feat.readinessGates.hasRubric).toBe(false)
+      expect(feat.readinessGates.deliveryOwnerAssigned).toBe(true)
       expect(feat.readinessGates.pastRefinement).toBe(false)
       expect(feat.readinessGates.hasTargetVersion).toBe(false)
       expect(feat.readinessGates.noBlockingViolations).toBe(true)
     })
 
-    it('works when ai-impact/features.json is null', function() {
+    it('works when no AI review data exists', function() {
       var healthCache = {
         features: [{
           key: 'AIPCC-900', summary: 'No ai-impact', status: 'In Progress',
@@ -1425,13 +1684,12 @@ describe('buildFeatureReadiness', function() {
         }]
       }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': null,
         'releases/planning/config.json': CONFIG_3_6,
         'releases/planning/health-cache-3.6-all.json': healthCache
       })
       var result = buildFeatureReadiness(readFromStorage)
-      expect(result.ready).toHaveLength(1)
-      expect(result.ready[0].key).toBe('AIPCC-900')
+      expect(result.pendingReview).toHaveLength(1)
+      expect(result.pendingReview[0].key).toBe('AIPCC-900')
     })
 
     it('meta counts include health-pipeline features', function() {
@@ -1440,18 +1698,18 @@ describe('buildFeatureReadiness', function() {
       })
       var healthCache = {
         features: [
-          { key: 'RHAISTRAT-1', priorityScore: 70 },
+          { key: 'RHAISTRAT-1', deliveryOwner: 'Alice', pmOwner: 'Jane', targetRelease: 'rhoai-3.6', priorityScore: 70 },
           { key: 'AIPCC-1000', summary: 'AIPCC Ready', status: 'In Progress', priority: 'Major', deliveryOwner: 'Alice', blockerCount: 0, targetRelease: 'rhoai-3.6' }
         ]
       }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         'releases/planning/health-cache-3.6-all.json': healthCache
       })
       var result = buildFeatureReadiness(readFromStorage)
       expect(result.meta.total).toBe(2)
-      expect(result.meta.readyCount).toBe(2)
+      expect(result.meta.readyCount).toBe(1)
     })
   })
 
@@ -1464,14 +1722,14 @@ describe('buildFeatureReadiness', function() {
       var hygieneCache = {
         features: { 'RHAISTRAT-1': { key: 'RHAISTRAT-1', team: 'Alpha', violations: violations } }
       }
-      var healthCache = { features: [{ key: 'RHAISTRAT-1', priorityScore: null }] }
+      var healthCache = { features: [{ key: 'RHAISTRAT-1', deliveryOwner: 'Alice', pmOwner: 'Jane', targetRelease: 'rhoai-3.6', priorityScore: null }] }
       var registryData = {
         releases: [
           { id: 'rhoai-3.6', displayName: 'RHOAI 3.6', fixVersions: ['RHOAI-3.6'], state: 'active', milestones: {} }
         ]
       }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         'releases/planning/health-cache-3.6-all.json': healthCache,
         'releases/registry.json': registryData,
@@ -1496,7 +1754,7 @@ describe('buildFeatureReadiness', function() {
         ]
       }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         'releases/planning/health-cache-3.6-all.json': healthCache,
         'releases/registry.json': registryData,
@@ -1513,14 +1771,14 @@ describe('buildFeatureReadiness', function() {
       })
       var directViolations = [{ id: 'stale-status-summary', name: 'Direct', category: 'timeliness', message: 'Direct' }]
       var aliasViolations = [{ id: 'missing-assignee', name: 'Alias', category: 'ownership', message: 'Alias' }]
-      var healthCache = { features: [{ key: 'RHAISTRAT-1', priorityScore: null }] }
+      var healthCache = { features: [{ key: 'RHAISTRAT-1', deliveryOwner: 'Alice', pmOwner: 'Jane', targetRelease: 'rhoai-3.6', priorityScore: null }] }
       var registryData = {
         releases: [
           { id: 'rhoai-3.6', displayName: 'RHOAI 3.6', fixVersions: [], state: 'active', milestones: {} }
         ]
       }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': CONFIG_3_6,
         'releases/planning/health-cache-3.6-all.json': healthCache,
         'releases/registry.json': registryData,
@@ -1528,7 +1786,8 @@ describe('buildFeatureReadiness', function() {
         'releases/hygiene/features-RHOAI 3.6.json': { features: { 'RHAISTRAT-1': { key: 'RHAISTRAT-1', team: 'A', violations: aliasViolations } } }
       })
       var result = buildFeatureReadiness(readFromStorage)
-      expect(result.ready[0].violations).toEqual(directViolations)
+      var feat = result.pendingReview.concat(result.ready).find(function(f) { return f.key === 'RHAISTRAT-1' })
+      expect(feat.violations).toEqual(directViolations)
     })
   })
 
@@ -1541,7 +1800,7 @@ describe('buildFeatureReadiness', function() {
       var config = { releases: { '3.5': { release: '3.5' }, '3.6': { release: '3.6' } } }
       var healthCache = { features: [{ key: 'RHAISTRAT-1', priorityScore: null }] }
       var readFromStorage = makeReadFromStorage({
-        'ai-impact/features.json': store,
+        ...convertToUnifiedFormat(store),
         'releases/planning/config.json': config,
         'releases/planning/health-cache-3.5-all.json': healthCache,
         'releases/planning/health-cache-3.6-all.json': healthCache,
@@ -1549,8 +1808,9 @@ describe('buildFeatureReadiness', function() {
         'releases/hygiene/features-3.6.json': { features: { 'RHAISTRAT-1': { key: 'RHAISTRAT-1', violations: violations } } }
       })
       var result = buildFeatureReadiness(readFromStorage)
-      expect(result.ready[0].team).toBe('Alpha')
-      expect(result.ready[0].violations).toEqual(violations)
+      var feat = result.pendingReview.concat(result.ready).find(function(f) { return f.key === 'RHAISTRAT-1' })
+      expect(feat.team).toBe('Alpha')
+      expect(feat.violations).toEqual(violations)
     })
   })
 
@@ -1661,7 +1921,7 @@ describe('buildFeatureReadiness — pass 3 (execution index)', function() {
 
   it('includes execution index features not in caches or ai-impact', function() {
     var readFromStorage = makeReadFromStorage({
-      'ai-impact/features.json': makeFeaturesStore({}),
+      ...convertToUnifiedFormat(makeFeaturesStore({})),
       'releases/planning/config.json': CONFIG_3_6,
       'releases/execution/index.json': makeExecIndex([
         makeExecFeature('RHAISTRAT-999')
@@ -1677,9 +1937,9 @@ describe('buildFeatureReadiness — pass 3 (execution index)', function() {
     expect(result.pendingReview[0].team).toBe('Platform')
   })
 
-  it('execution feature with sign-off label and all gates passing is ready', function() {
+  it('execution feature with sign-off but no rubric goes to pendingReview', function() {
     var readFromStorage = makeReadFromStorage({
-      'ai-impact/features.json': makeFeaturesStore({}),
+      ...convertToUnifiedFormat(makeFeaturesStore({})),
       'releases/planning/config.json': CONFIG_3_6,
       'releases/execution/index.json': makeExecIndex([
         makeExecFeature('RHAISTRAT-888', {
@@ -1692,14 +1952,16 @@ describe('buildFeatureReadiness — pass 3 (execution index)', function() {
     })
 
     var result = buildFeatureReadiness(readFromStorage)
-    expect(result.ready.length).toBe(1)
-    expect(result.ready[0].confidence).toBe('ready')
-    expect(result.ready[0].humanReviewStatus).toBe('approved')
+    expect(result.pendingReview.length).toBe(1)
+    expect(result.pendingReview[0].confidence).toBe('not-ready')
+    expect(result.pendingReview[0].humanReviewStatus).toBe('approved')
+    expect(result.pendingReview[0].readinessGates.isApproved).toBe(true)
+    expect(result.pendingReview[0].readinessGates.hasRubric).toBe(false)
   })
 
   it('execution feature in Refinement status is not ready', function() {
     var readFromStorage = makeReadFromStorage({
-      'ai-impact/features.json': makeFeaturesStore({}),
+      ...convertToUnifiedFormat(makeFeaturesStore({})),
       'releases/planning/config.json': CONFIG_3_6,
       'releases/execution/index.json': makeExecIndex([
         makeExecFeature('RHAISTRAT-777', {
@@ -1716,7 +1978,7 @@ describe('buildFeatureReadiness — pass 3 (execution index)', function() {
 
   it('skips closed features from execution index', function() {
     var readFromStorage = makeReadFromStorage({
-      'ai-impact/features.json': makeFeaturesStore({}),
+      ...convertToUnifiedFormat(makeFeaturesStore({})),
       'releases/planning/config.json': CONFIG_3_6,
       'releases/execution/index.json': makeExecIndex([
         makeExecFeature('RHAISTRAT-666', { status: 'Closed' }),
@@ -1735,7 +1997,7 @@ describe('buildFeatureReadiness — pass 3 (execution index)', function() {
       'RHAISTRAT-1': { latest: makeLatest({ humanReviewStatus: 'approved' }) }
     })
     var readFromStorage = makeReadFromStorage({
-      'ai-impact/features.json': store,
+      ...convertToUnifiedFormat(store),
       'releases/planning/config.json': CONFIG_3_6,
       'releases/execution/index.json': makeExecIndex([
         makeExecFeature('RHAISTRAT-1')
@@ -1749,7 +2011,7 @@ describe('buildFeatureReadiness — pass 3 (execution index)', function() {
 
   it('does not duplicate features already in health-pipeline pass', function() {
     var readFromStorage = makeReadFromStorage({
-      'ai-impact/features.json': makeFeaturesStore({}),
+      ...convertToUnifiedFormat(makeFeaturesStore({})),
       'releases/planning/config.json': CONFIG_3_6,
       'releases/planning/health-cache-3.6-all.json': {
         features: [{ key: 'RHAISTRAT-50', summary: 'Health Feature', status: 'In Progress', priority: 'Major' }]
@@ -1768,7 +2030,7 @@ describe('buildFeatureReadiness — pass 3 (execution index)', function() {
 
   it('populates filter metadata from execution features', function() {
     var readFromStorage = makeReadFromStorage({
-      'ai-impact/features.json': makeFeaturesStore({}),
+      ...convertToUnifiedFormat(makeFeaturesStore({})),
       'releases/planning/config.json': CONFIG_3_6,
       'releases/execution/index.json': makeExecIndex([
         makeExecFeature('RHAISTRAT-444', {
@@ -1787,9 +2049,9 @@ describe('buildFeatureReadiness — pass 3 (execution index)', function() {
     expect(result.filterMeta.targetVersions).toContain('rhoai-4.0')
   })
 
-  it('execution feature with fix version gets committed confidence', function() {
+  it('execution feature with fix version still goes to pendingReview (no rubric)', function() {
     var readFromStorage = makeReadFromStorage({
-      'ai-impact/features.json': makeFeaturesStore({}),
+      ...convertToUnifiedFormat(makeFeaturesStore({})),
       'releases/planning/config.json': CONFIG_3_6,
       'releases/execution/index.json': makeExecIndex([
         makeExecFeature('RHAISTRAT-333', {
@@ -1803,13 +2065,13 @@ describe('buildFeatureReadiness — pass 3 (execution index)', function() {
     })
 
     var result = buildFeatureReadiness(readFromStorage)
-    expect(result.ready[0].confidence).toBe('committed')
-    expect(result.ready[0].fixVersion).toBe('rhoai-3.6')
+    expect(result.pendingReview[0].confidence).toBe('not-ready')
+    expect(result.pendingReview[0].fixVersion).toBe('rhoai-3.6')
   })
 
   it('handles string components from execution index', function() {
     var readFromStorage = makeReadFromStorage({
-      'ai-impact/features.json': makeFeaturesStore({}),
+      ...convertToUnifiedFormat(makeFeaturesStore({})),
       'releases/planning/config.json': CONFIG_3_6,
       'releases/execution/index.json': makeExecIndex([
         makeExecFeature('RHAISTRAT-222', { components: 'UI, API, Docs' })
@@ -1822,7 +2084,7 @@ describe('buildFeatureReadiness — pass 3 (execution index)', function() {
 
   it('handles multiple execution features sorted by priority score', function() {
     var readFromStorage = makeReadFromStorage({
-      'ai-impact/features.json': makeFeaturesStore({}),
+      ...convertToUnifiedFormat(makeFeaturesStore({})),
       'releases/planning/config.json': CONFIG_3_6,
       'releases/execution/index.json': makeExecIndex([
         makeExecFeature('RHAISTRAT-A', { priority: 'Minor' }),
@@ -1839,7 +2101,7 @@ describe('buildFeatureReadiness — pass 3 (execution index)', function() {
 
   it('handles empty execution index gracefully', function() {
     var readFromStorage = makeReadFromStorage({
-      'ai-impact/features.json': makeFeaturesStore({}),
+      ...convertToUnifiedFormat(makeFeaturesStore({})),
       'releases/planning/config.json': CONFIG_3_6,
       'releases/execution/index.json': makeExecIndex([])
     })
@@ -1850,11 +2112,1073 @@ describe('buildFeatureReadiness — pass 3 (execution index)', function() {
 
   it('handles missing execution index gracefully', function() {
     var readFromStorage = makeReadFromStorage({
-      'ai-impact/features.json': makeFeaturesStore({}),
+      ...convertToUnifiedFormat(makeFeaturesStore({})),
       'releases/planning/config.json': CONFIG_3_6
     })
 
     var result = buildFeatureReadiness(readFromStorage)
     expect(result.meta.total).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Pass 3: Jira features as primary source
+// ---------------------------------------------------------------------------
+
+describe('buildFeatureReadiness — pass 3 (jiraFeatures)', function() {
+  function makeExecIndex(features) {
+    return { features: features, fetchedAt: '2026-06-09T00:00:00Z', schemaVersion: 'v2', featureCount: features.length }
+  }
+
+  function makeExecFeature(key, overrides) {
+    return Object.assign({
+      key: key,
+      summary: 'Exec Feature ' + key,
+      status: 'In Progress',
+      priority: 'Major',
+      assignee: 'Jane Doe',
+      components: ['UI'],
+      labels: [],
+      targetVersions: ['rhoai-3.6'],
+      fixVersions: [],
+      team: 'Platform'
+    }, overrides)
+  }
+
+  function makeJiraMap(features) {
+    var map = new Map()
+    for (var i = 0; i < features.length; i++) {
+      map.set(features[i].key, features[i])
+    }
+    return map
+  }
+
+  function makeJiraFeature(key, overrides) {
+    return Object.assign({
+      key: key,
+      summary: 'Jira Feature ' + key,
+      status: 'In Progress',
+      issueType: 'Feature',
+      assignee: 'Alice',
+      team: 'Platform',
+      components: ['Dashboard'],
+      labels: [],
+      fixVersions: [],
+      targetVersions: ['rhoai-3.6'],
+      priority: 'Major',
+      riceScore: null
+    }, overrides)
+  }
+
+  it('uses jiraFeatures as pass 3 source when provided', function() {
+    var jiraFeatures = makeJiraMap([
+      makeJiraFeature('RHAISTRAT-900')
+    ])
+    var readFromStorage = makeReadFromStorage({
+      ...convertToUnifiedFormat(makeFeaturesStore({})),
+      'releases/planning/config.json': CONFIG_3_6,
+      'releases/execution/index.json': makeExecIndex([])
+    })
+
+    var result = buildFeatureReadiness(readFromStorage, jiraFeatures)
+    expect(result.meta.total).toBe(1)
+    expect(result.pendingReview[0].key).toBe('RHAISTRAT-900')
+    expect(result.pendingReview[0].dataSource).toBe('jira')
+    expect(result.pendingReview[0].title).toBe('Jira Feature RHAISTRAT-900')
+  })
+
+  it('falls back to execution index when jiraFeatures is null', function() {
+    var readFromStorage = makeReadFromStorage({
+      ...convertToUnifiedFormat(makeFeaturesStore({})),
+      'releases/planning/config.json': CONFIG_3_6,
+      'releases/execution/index.json': makeExecIndex([
+        makeExecFeature('RHAISTRAT-800')
+      ])
+    })
+
+    var result = buildFeatureReadiness(readFromStorage, null)
+    expect(result.meta.total).toBe(1)
+    expect(result.pendingReview[0].key).toBe('RHAISTRAT-800')
+    expect(result.pendingReview[0].dataSource).toBe('execution')
+  })
+
+  it('falls back to execution index when jiraFeatures is empty Map', function() {
+    var readFromStorage = makeReadFromStorage({
+      ...convertToUnifiedFormat(makeFeaturesStore({})),
+      'releases/planning/config.json': CONFIG_3_6,
+      'releases/execution/index.json': makeExecIndex([
+        makeExecFeature('RHAISTRAT-700')
+      ])
+    })
+
+    var result = buildFeatureReadiness(readFromStorage, new Map())
+    expect(result.meta.total).toBe(1)
+    expect(result.pendingReview[0].key).toBe('RHAISTRAT-700')
+    expect(result.pendingReview[0].dataSource).toBe('execution')
+  })
+
+  it('does not duplicate features already in strat-creator pass', function() {
+    var store = makeFeaturesStore({
+      'RHAISTRAT-1': { latest: makeLatest({ humanReviewStatus: 'approved' }) }
+    })
+    var jiraFeatures = makeJiraMap([
+      makeJiraFeature('RHAISTRAT-1')
+    ])
+    var readFromStorage = makeReadFromStorage({
+      ...convertToUnifiedFormat(store),
+      'releases/planning/config.json': CONFIG_3_6,
+      'releases/execution/index.json': makeExecIndex([])
+    })
+
+    var result = buildFeatureReadiness(readFromStorage, jiraFeatures)
+    var keys = result.pendingReview.concat(result.ready).map(function(f) { return f.key })
+    expect(new Set(keys).size).toBe(keys.length)
+  })
+
+  it('does not duplicate features already in health-pipeline pass', function() {
+    var jiraFeatures = makeJiraMap([
+      makeJiraFeature('RHAISTRAT-50')
+    ])
+    var readFromStorage = makeReadFromStorage({
+      ...convertToUnifiedFormat(makeFeaturesStore({})),
+      'releases/planning/config.json': CONFIG_3_6,
+      'releases/planning/health-cache-3.6-all.json': {
+        features: [{ key: 'RHAISTRAT-50', summary: 'Health Feature', status: 'In Progress', priority: 'Major' }]
+      },
+      'releases/execution/index.json': makeExecIndex([])
+    })
+
+    var result = buildFeatureReadiness(readFromStorage, jiraFeatures)
+    var keys = result.pendingReview.concat(result.ready).map(function(f) { return f.key })
+    expect(new Set(keys).size).toBe(keys.length)
+    var feature = result.pendingReview.concat(result.ready).find(function(f) { return f.key === 'RHAISTRAT-50' })
+    expect(feature.dataSource).toBe('health-pipeline')
+  })
+
+  it('enriches Jira features with execution index data when available', function() {
+    var jiraFeatures = makeJiraMap([
+      makeJiraFeature('RHAISTRAT-600', { riceScore: null })
+    ])
+    var readFromStorage = makeReadFromStorage({
+      ...convertToUnifiedFormat(makeFeaturesStore({})),
+      'releases/planning/config.json': CONFIG_3_6,
+      'releases/execution/index.json': makeExecIndex([
+        makeExecFeature('RHAISTRAT-600', { riceScore: 250, blockerCount: 3 })
+      ])
+    })
+
+    var result = buildFeatureReadiness(readFromStorage, jiraFeatures)
+    expect(result.meta.total).toBe(1)
+    var feature = result.pendingReview.concat(result.ready).find(function(f) { return f.key === 'RHAISTRAT-600' })
+    expect(feature.dataSource).toBe('jira')
+    expect(feature.riceScore).toBe(250)
+    expect(feature.readinessGates.hasRubric).toBe(false)
+  })
+
+  it('Jira feature with sign-off but no rubric goes to pendingReview', function() {
+    var jiraFeatures = makeJiraMap([
+      makeJiraFeature('RHAISTRAT-500', {
+        labels: ['strat-creator-human-sign-off'],
+        assignee: 'Alice',
+        team: 'MyTeam',
+        status: 'In Progress',
+        targetVersions: ['rhoai-3.6'],
+        fixVersions: ['rhoai-3.6'],
+        colorStatus: 'Green',
+        releaseType: 'GA',
+        docsRequired: 'Yes',
+        targetEnd: '2026-09-15'
+      })
+    ])
+    var readFromStorage = makeReadFromStorage({
+      ...convertToUnifiedFormat(makeFeaturesStore({})),
+      'releases/planning/config.json': CONFIG_3_6,
+      'releases/execution/index.json': makeExecIndex([])
+    })
+
+    var result = buildFeatureReadiness(readFromStorage, jiraFeatures)
+    expect(result.pendingReview.length).toBe(1)
+    expect(result.pendingReview[0].confidence).toBe('not-ready')
+    expect(result.pendingReview[0].humanReviewStatus).toBe('approved')
+    expect(result.pendingReview[0].readinessGates.isApproved).toBe(true)
+    expect(result.pendingReview[0].readinessGates.hasRubric).toBe(false)
+  })
+
+  it('Jira feature with fix version still goes to pendingReview (no rubric)', function() {
+    var jiraFeatures = makeJiraMap([
+      makeJiraFeature('RHAISTRAT-400', {
+        labels: ['strat-creator-human-sign-off'],
+        fixVersions: ['rhoai-3.6'],
+        assignee: 'Alice',
+        status: 'In Progress',
+        targetVersions: ['rhoai-3.6']
+      })
+    ])
+    var readFromStorage = makeReadFromStorage({
+      ...convertToUnifiedFormat(makeFeaturesStore({})),
+      'releases/planning/config.json': CONFIG_3_6,
+      'releases/execution/index.json': makeExecIndex([])
+    })
+
+    var result = buildFeatureReadiness(readFromStorage, jiraFeatures)
+    expect(result.pendingReview[0].confidence).toBe('not-ready')
+    expect(result.pendingReview[0].fixVersion).toBe('rhoai-3.6')
+  })
+
+  it('skips closed Jira features', function() {
+    var jiraFeatures = makeJiraMap([
+      makeJiraFeature('RHAISTRAT-C1', { status: 'Closed' }),
+      makeJiraFeature('RHAISTRAT-C2', { status: 'Resolved' }),
+      makeJiraFeature('RHAISTRAT-C3', { status: 'In Progress' })
+    ])
+    var readFromStorage = makeReadFromStorage({
+      ...convertToUnifiedFormat(makeFeaturesStore({})),
+      'releases/planning/config.json': CONFIG_3_6,
+      'releases/execution/index.json': makeExecIndex([])
+    })
+
+    var result = buildFeatureReadiness(readFromStorage, jiraFeatures)
+    expect(result.meta.total).toBe(1)
+    expect(result.pendingReview[0].key).toBe('RHAISTRAT-C3')
+  })
+
+  it('Jira feature in Refinement status is not ready', function() {
+    var jiraFeatures = makeJiraMap([
+      makeJiraFeature('RHAISTRAT-REF', {
+        labels: ['strat-creator-human-sign-off'],
+        status: 'Refinement'
+      })
+    ])
+    var readFromStorage = makeReadFromStorage({
+      ...convertToUnifiedFormat(makeFeaturesStore({})),
+      'releases/planning/config.json': CONFIG_3_6,
+      'releases/execution/index.json': makeExecIndex([])
+    })
+
+    var result = buildFeatureReadiness(readFromStorage, jiraFeatures)
+    expect(result.pendingReview.length).toBe(1)
+    expect(result.pendingReview[0].readinessGates.pastRefinement).toBe(false)
+  })
+
+  it('populates filter metadata from Jira features', function() {
+    var jiraFeatures = makeJiraMap([
+      makeJiraFeature('RHAISTRAT-META', {
+        components: ['NewJiraComp'],
+        team: 'JiraTeam',
+        priority: 'Critical',
+        targetVersions: ['rhoai-4.0']
+      })
+    ])
+    var readFromStorage = makeReadFromStorage({
+      ...convertToUnifiedFormat(makeFeaturesStore({})),
+      'releases/planning/config.json': CONFIG_3_6,
+      'releases/execution/index.json': makeExecIndex([])
+    })
+
+    var result = buildFeatureReadiness(readFromStorage, jiraFeatures)
+    expect(result.filterMeta.components).toContain('NewJiraComp')
+    expect(result.filterMeta.teams).toContain('JiraTeam')
+    expect(result.filterMeta.priorities).toContain('Critical')
+    expect(result.filterMeta.targetVersions).toContain('rhoai-4.0')
+  })
+
+  it('prefers Jira riceScore over execution index riceScore', function() {
+    var jiraFeatures = makeJiraMap([
+      makeJiraFeature('RHAISTRAT-RICE', { riceScore: 100 })
+    ])
+    var readFromStorage = makeReadFromStorage({
+      ...convertToUnifiedFormat(makeFeaturesStore({})),
+      'releases/planning/config.json': CONFIG_3_6,
+      'releases/execution/index.json': makeExecIndex([
+        makeExecFeature('RHAISTRAT-RICE', { riceScore: 50 })
+      ])
+    })
+
+    var result = buildFeatureReadiness(readFromStorage, jiraFeatures)
+    var feature = result.pendingReview.concat(result.ready).find(function(f) { return f.key === 'RHAISTRAT-RICE' })
+    expect(feature.riceScore).toBe(100)
+  })
+
+  it('uses execution index riceScore when Jira riceScore is null', function() {
+    var jiraFeatures = makeJiraMap([
+      makeJiraFeature('RHAISTRAT-RICE2', { riceScore: null })
+    ])
+    var readFromStorage = makeReadFromStorage({
+      ...convertToUnifiedFormat(makeFeaturesStore({})),
+      'releases/planning/config.json': CONFIG_3_6,
+      'releases/execution/index.json': makeExecIndex([
+        makeExecFeature('RHAISTRAT-RICE2', { riceScore: 75 })
+      ])
+    })
+
+    var result = buildFeatureReadiness(readFromStorage, jiraFeatures)
+    var feature = result.pendingReview.concat(result.ready).find(function(f) { return f.key === 'RHAISTRAT-RICE2' })
+    expect(feature.riceScore).toBe(75)
+  })
+
+  it('includes Jira features not present in execution index', function() {
+    var jiraFeatures = makeJiraMap([
+      makeJiraFeature('RHAISTRAT-JONLY', { summary: 'Jira only feature' })
+    ])
+    var readFromStorage = makeReadFromStorage({
+      ...convertToUnifiedFormat(makeFeaturesStore({})),
+      'releases/planning/config.json': CONFIG_3_6,
+      'releases/execution/index.json': makeExecIndex([])
+    })
+
+    var result = buildFeatureReadiness(readFromStorage, jiraFeatures)
+    expect(result.meta.total).toBe(1)
+    expect(result.pendingReview[0].title).toBe('Jira only feature')
+  })
+
+  it('handles multiple Jira features sorted by priority score', function() {
+    var jiraFeatures = makeJiraMap([
+      makeJiraFeature('RHAISTRAT-J1', { priority: 'Minor' }),
+      makeJiraFeature('RHAISTRAT-J2', { priority: 'Blocker' }),
+      makeJiraFeature('RHAISTRAT-J3', { priority: 'Major' })
+    ])
+    var readFromStorage = makeReadFromStorage({
+      ...convertToUnifiedFormat(makeFeaturesStore({})),
+      'releases/planning/config.json': CONFIG_3_6,
+      'releases/execution/index.json': makeExecIndex([])
+    })
+
+    var result = buildFeatureReadiness(readFromStorage, jiraFeatures)
+    expect(result.pendingReview.length).toBe(3)
+    expect(result.pendingReview[0].key).toBe('RHAISTRAT-J2')
+    expect(result.pendingReview[result.pendingReview.length - 1].key).toBe('RHAISTRAT-J1')
+  })
+
+  it('Jira feature without assignee fails deliveryOwnerAssigned gate', function() {
+    var jiraFeatures = makeJiraMap([
+      makeJiraFeature('RHAISTRAT-NOOWN', {
+        assignee: null,
+        labels: ['strat-creator-human-sign-off']
+      })
+    ])
+    var readFromStorage = makeReadFromStorage({
+      ...convertToUnifiedFormat(makeFeaturesStore({})),
+      'releases/planning/config.json': CONFIG_3_6,
+      'releases/execution/index.json': makeExecIndex([])
+    })
+
+    var result = buildFeatureReadiness(readFromStorage, jiraFeatures)
+    expect(result.pendingReview.length).toBe(1)
+    expect(result.pendingReview[0].readinessGates.deliveryOwnerAssigned).toBe(false)
+  })
+
+  it('Jira feature without target version fails hasTargetVersion gate', function() {
+    var jiraFeatures = makeJiraMap([
+      makeJiraFeature('RHAISTRAT-NOTV', {
+        targetVersions: [],
+        labels: ['strat-creator-human-sign-off']
+      })
+    ])
+    var readFromStorage = makeReadFromStorage({
+      ...convertToUnifiedFormat(makeFeaturesStore({})),
+      'releases/planning/config.json': CONFIG_3_6,
+      'releases/execution/index.json': makeExecIndex([])
+    })
+
+    var result = buildFeatureReadiness(readFromStorage, jiraFeatures)
+    expect(result.pendingReview.length).toBe(1)
+    expect(result.pendingReview[0].readinessGates.hasTargetVersion).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// All-hygiene-files loading via listStorageFiles
+// ---------------------------------------------------------------------------
+
+describe('buildFeatureReadiness - all-hygiene-files loading', function() {
+  function makeExecIndex(features) {
+    return { features: features, fetchedAt: '2026-06-09T00:00:00Z', schemaVersion: 'v2', featureCount: features.length }
+  }
+
+  function makeExecFeature(key, overrides) {
+    return Object.assign({
+      key: key,
+      summary: 'Exec Feature ' + key,
+      status: 'In Progress',
+      priority: 'Major',
+      assignee: 'Jane Doe',
+      components: ['UI'],
+      labels: [],
+      targetVersions: ['rhoai-3.6'],
+      fixVersions: [],
+      team: 'Platform'
+    }, overrides)
+  }
+
+  function makeJiraMap(features) {
+    var map = new Map()
+    for (var i = 0; i < features.length; i++) {
+      map.set(features[i].key, features[i])
+    }
+    return map
+  }
+
+  function makeJiraFeature(key, overrides) {
+    return Object.assign({
+      key: key,
+      summary: 'Jira Feature ' + key,
+      status: 'In Progress',
+      issueType: 'Feature',
+      assignee: 'Alice',
+      team: 'Platform',
+      components: ['Dashboard'],
+      labels: [],
+      fixVersions: [],
+      targetVersions: ['rhoai-3.6'],
+      priority: 'Major',
+      riceScore: null
+    }, overrides)
+  }
+
+  it('loads team and violations from non-configured hygiene files via listStorageFiles', function() {
+    var jiraFeatures = makeJiraMap([
+      makeJiraFeature('RHAISTRAT-500', { team: null })
+    ])
+
+    var readFromStorage = makeReadFromStorage({
+      'ai-impact/features.json': makeFeaturesStore({}),
+      'releases/planning/config.json': { releases: { '3.6': { release: '3.6' } } },
+      'releases/execution/index.json': makeExecIndex([]),
+      'releases/hygiene/features-rhoai-3.7.json': {
+        features: {
+          'RHAISTRAT-500': {
+            team: 'Llama Stack Core',
+            violations: [{ id: 'missing-fix-version', name: 'Missing Fix Version' }]
+          }
+        }
+      }
+    })
+
+    var listStorageFiles = function(dir) {
+      if (dir === 'releases/hygiene') return ['features-rhoai-3.7.json']
+      return []
+    }
+
+    var result = buildFeatureReadiness(readFromStorage, jiraFeatures, listStorageFiles)
+    var feature = result.pendingReview.concat(result.ready).find(function(f) { return f.key === 'RHAISTRAT-500' })
+    expect(feature).toBeDefined()
+    expect(feature.team).toBe('Llama Stack Core')
+    expect(feature.violations).toEqual([{ id: 'missing-fix-version', name: 'Missing Fix Version' }])
+  })
+
+  it('does not overwrite team from configured version with non-configured version data', function() {
+    var readFromStorage = makeReadFromStorage({
+      'ai-impact/features.json': makeFeaturesStore({}),
+      'releases/planning/config.json': { releases: { '3.6': { release: '3.6' } } },
+      'releases/execution/index.json': makeExecIndex([
+        makeExecFeature('RHAISTRAT-600', { team: null })
+      ]),
+      'releases/hygiene/features-3.6.json': {
+        features: {
+          'RHAISTRAT-600': { team: 'RHOAI Dashboard', violations: [] }
+        }
+      },
+      'releases/hygiene/features-rhoai-3.7.json': {
+        features: {
+          'RHAISTRAT-600': { team: 'Llama Stack Core', violations: [{ id: 'test' }] }
+        }
+      }
+    })
+
+    var listStorageFiles = function(dir) {
+      if (dir === 'releases/hygiene') return ['features-3.6.json', 'features-rhoai-3.7.json']
+      return []
+    }
+
+    var result = buildFeatureReadiness(readFromStorage, null, listStorageFiles)
+    var feature = result.pendingReview.concat(result.ready).find(function(f) { return f.key === 'RHAISTRAT-600' })
+    expect(feature).toBeDefined()
+    expect(feature.team).toBe('RHOAI Dashboard')
+  })
+
+  it('works without listStorageFiles (backward compatible)', function() {
+    var readFromStorage = makeReadFromStorage({
+      'ai-impact/features.json': makeFeaturesStore({}),
+      'releases/planning/config.json': { releases: { '3.6': { release: '3.6' } } },
+      'releases/execution/index.json': makeExecIndex([
+        makeExecFeature('RHAISTRAT-700')
+      ])
+    })
+
+    var result = buildFeatureReadiness(readFromStorage, null)
+    expect(result.pendingReview.concat(result.ready).length).toBeGreaterThan(0)
+  })
+
+  it('handles listStorageFiles throwing an error gracefully', function() {
+    var readFromStorage = makeReadFromStorage({
+      'ai-impact/features.json': makeFeaturesStore({}),
+      'releases/planning/config.json': { releases: { '3.6': { release: '3.6' } } },
+      'releases/execution/index.json': makeExecIndex([
+        makeExecFeature('RHAISTRAT-800')
+      ])
+    })
+
+    var listStorageFiles = function() {
+      throw new Error('directory not found')
+    }
+
+    var result = buildFeatureReadiness(readFromStorage, null, listStorageFiles)
+    expect(result.pendingReview.concat(result.ready).length).toBeGreaterThan(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Jira data fallback for passes 1 and 2
+// ---------------------------------------------------------------------------
+
+describe('buildFeatureReadiness - Jira data fallback enrichment', function() {
+  function makeJiraMap(features) {
+    var map = new Map()
+    for (var i = 0; i < features.length; i++) {
+      map.set(features[i].key, features[i])
+    }
+    return map
+  }
+
+  function makeJiraFeature(key, overrides) {
+    return Object.assign({
+      key: key,
+      summary: 'Jira Feature ' + key,
+      status: 'In Progress',
+      issueType: 'Feature',
+      assignee: 'JiraAssignee',
+      team: 'JiraTeam',
+      components: ['JiraComp'],
+      labels: [],
+      fixVersions: [],
+      targetVersions: ['rhoai-3.6'],
+      priority: 'Major',
+      riceScore: null
+    }, overrides)
+  }
+
+  it('pass 1: uses Jira team when teamIndex has no entry', function() {
+    var jiraFeatures = makeJiraMap([
+      makeJiraFeature('RHAISTRAT-1', { team: 'JiraTeamFallback' })
+    ])
+
+    var readFromStorage = makeReadFromStorage({
+      'ai-impact/features.json': makeFeaturesStore({
+        'RHAISTRAT-1': {
+          latest: makeLatest({ key: 'RHAISTRAT-1', humanReviewStatus: 'approved' })
+        }
+      }),
+      'releases/planning/config.json': { releases: { '3.6': { release: '3.6' } } },
+      'releases/planning/candidates-cache-3.6.json': {
+        data: { features: [{ issueKey: 'RHAISTRAT-1', tier: 1, bigRock: 'Rock' }] }
+      },
+      'releases/execution/index.json': { features: [], fetchedAt: '2026-06-09T00:00:00Z', schemaVersion: 'v2', featureCount: 0 }
+    })
+
+    var result = buildFeatureReadiness(readFromStorage, jiraFeatures)
+    var feature = result.pendingReview.concat(result.ready).find(function(f) { return f.key === 'RHAISTRAT-1' })
+    expect(feature).toBeDefined()
+    expect(feature.team).toBe('JiraTeamFallback')
+  })
+
+  it('pass 1: uses Jira components when strat-creator and health-cache are empty', function() {
+    var jiraFeatures = makeJiraMap([
+      makeJiraFeature('RHAISTRAT-1', { components: ['CompFromJira'] })
+    ])
+
+    var readFromStorage = makeReadFromStorage({
+      'ai-impact/features.json': makeFeaturesStore({
+        'RHAISTRAT-1': {
+          latest: makeLatest({ key: 'RHAISTRAT-1', components: [] })
+        }
+      }),
+      'releases/planning/config.json': { releases: { '3.6': { release: '3.6' } } },
+      'releases/planning/candidates-cache-3.6.json': {
+        data: { features: [{ issueKey: 'RHAISTRAT-1', tier: 1, bigRock: 'Rock' }] }
+      },
+      'releases/execution/index.json': { features: [], fetchedAt: '2026-06-09T00:00:00Z', schemaVersion: 'v2', featureCount: 0 }
+    })
+
+    var result = buildFeatureReadiness(readFromStorage, jiraFeatures)
+    var feature = result.pendingReview.concat(result.ready).find(function(f) { return f.key === 'RHAISTRAT-1' })
+    expect(feature).toBeDefined()
+    expect(feature.components).toEqual(['CompFromJira'])
+  })
+
+  it('pass 1: uses Jira assignee as deliveryOwner when healthData has none', function() {
+    var jiraFeatures = makeJiraMap([
+      makeJiraFeature('RHAISTRAT-1', { assignee: 'JiraOwner' })
+    ])
+
+    var readFromStorage = makeReadFromStorage({
+      'ai-impact/features.json': makeFeaturesStore({
+        'RHAISTRAT-1': {
+          latest: makeLatest({ key: 'RHAISTRAT-1' })
+        }
+      }),
+      'releases/planning/config.json': { releases: { '3.6': { release: '3.6' } } },
+      'releases/planning/candidates-cache-3.6.json': {
+        data: { features: [{ issueKey: 'RHAISTRAT-1', tier: 1, bigRock: 'Rock' }] }
+      },
+      'releases/execution/index.json': { features: [], fetchedAt: '2026-06-09T00:00:00Z', schemaVersion: 'v2', featureCount: 0 }
+    })
+
+    var result = buildFeatureReadiness(readFromStorage, jiraFeatures)
+    var feature = result.pendingReview.concat(result.ready).find(function(f) { return f.key === 'RHAISTRAT-1' })
+    expect(feature).toBeDefined()
+    expect(feature.deliveryOwner).toBe('JiraOwner')
+  })
+
+  it('pass 2: uses Jira team when teamIndex has no entry', function() {
+    var jiraFeatures = makeJiraMap([
+      makeJiraFeature('RHAISTRAT-HP1', { team: 'JiraTeamHP' })
+    ])
+
+    var readFromStorage = makeReadFromStorage({
+      'ai-impact/features.json': makeFeaturesStore({}),
+      'releases/planning/config.json': { releases: { '3.6': { release: '3.6' } } },
+      'releases/planning/health-cache-3.6-all.json': {
+        features: [{
+          key: 'RHAISTRAT-HP1',
+          summary: 'Health Feature',
+          status: 'In Progress',
+          priority: 'Major',
+          components: '',
+          assignee: 'Owner'
+        }]
+      },
+      'releases/execution/index.json': { features: [], fetchedAt: '2026-06-09T00:00:00Z', schemaVersion: 'v2', featureCount: 0 }
+    })
+
+    var result = buildFeatureReadiness(readFromStorage, jiraFeatures)
+    var feature = result.pendingReview.concat(result.ready).find(function(f) { return f.key === 'RHAISTRAT-HP1' })
+    expect(feature).toBeDefined()
+    expect(feature.team).toBe('JiraTeamHP')
+  })
+
+  it('pass 2: uses Jira components when health-cache components are empty', function() {
+    var jiraFeatures = makeJiraMap([
+      makeJiraFeature('RHAISTRAT-HP2', { components: ['JiraCompHP'] })
+    ])
+
+    var readFromStorage = makeReadFromStorage({
+      'ai-impact/features.json': makeFeaturesStore({}),
+      'releases/planning/config.json': { releases: { '3.6': { release: '3.6' } } },
+      'releases/planning/health-cache-3.6-all.json': {
+        features: [{
+          key: 'RHAISTRAT-HP2',
+          summary: 'Health Feature',
+          status: 'In Progress',
+          priority: 'Major',
+          components: '',
+          assignee: 'Owner'
+        }]
+      },
+      'releases/execution/index.json': { features: [], fetchedAt: '2026-06-09T00:00:00Z', schemaVersion: 'v2', featureCount: 0 }
+    })
+
+    var result = buildFeatureReadiness(readFromStorage, jiraFeatures)
+    var feature = result.pendingReview.concat(result.ready).find(function(f) { return f.key === 'RHAISTRAT-HP2' })
+    expect(feature).toBeDefined()
+    expect(feature.components).toEqual(['JiraCompHP'])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Hygiene violations from cache (hygieneIndex)
+// ---------------------------------------------------------------------------
+
+describe('buildFeatureReadiness - hygiene violations from cache', function() {
+  function makeExecIndex(features) {
+    return { features: features, fetchedAt: '2026-06-09T00:00:00Z', schemaVersion: 'v2', featureCount: features.length }
+  }
+
+  function makeJiraMap(features) {
+    var map = new Map()
+    for (var i = 0; i < features.length; i++) {
+      map.set(features[i].key, features[i])
+    }
+    return map
+  }
+
+  function makeJiraFeature(key, overrides) {
+    return Object.assign({
+      key: key,
+      summary: 'Jira Feature ' + key,
+      status: 'In Progress',
+      issueType: 'Feature',
+      assignee: null,
+      team: null,
+      components: [],
+      labels: [],
+      fixVersions: [],
+      targetVersions: ['rhoai-3.6'],
+      priority: 'Major',
+      riceScore: null,
+      statusSummary: null,
+      colorStatus: null,
+      releaseType: null,
+      docsRequired: null,
+      targetEnd: null
+    }, overrides)
+  }
+
+  it('attaches cached violations from hygieneIndex', function() {
+    var jiraFeatures = makeJiraMap([
+      makeJiraFeature('RHAISTRAT-DYN2', {
+        status: 'In Progress',
+        assignee: null
+      })
+    ])
+
+    var readFromStorage = makeReadFromStorage({
+      'ai-impact/features.json': makeFeaturesStore({}),
+      'releases/planning/config.json': { releases: { '3.6': { release: '3.6' } } },
+      'releases/execution/index.json': makeExecIndex([]),
+      'releases/hygiene/features-3.6.json': {
+        features: {
+          'RHAISTRAT-DYN2': {
+            team: 'CachedTeam',
+            violations: [{ id: 'cached-violation', name: 'Cached Violation' }]
+          }
+        }
+      }
+    })
+
+    var result = buildFeatureReadiness(readFromStorage, jiraFeatures)
+    var feature = result.pendingReview.concat(result.ready).find(function(f) { return f.key === 'RHAISTRAT-DYN2' })
+    expect(feature).toBeDefined()
+    expect(feature.violations).toEqual([{ id: 'cached-violation', name: 'Cached Violation' }])
+  })
+
+  it('returns null violations for features not in hygieneIndex', function() {
+    var jiraFeatures = makeJiraMap([
+      makeJiraFeature('RHAISTRAT-DYN1', {
+        status: 'In Progress',
+        assignee: null,
+        team: null
+      })
+    ])
+
+    var readFromStorage = makeReadFromStorage({
+      'ai-impact/features.json': makeFeaturesStore({}),
+      'releases/planning/config.json': { releases: { '3.6': { release: '3.6' } } },
+      'releases/execution/index.json': makeExecIndex([])
+    })
+
+    var result = buildFeatureReadiness(readFromStorage, jiraFeatures)
+    var feature = result.pendingReview.concat(result.ready).find(function(f) { return f.key === 'RHAISTRAT-DYN1' })
+    expect(feature).toBeDefined()
+    expect(feature.violations).toBeNull()
+  })
+
+  it('returns null violations for execution index features', function() {
+    var readFromStorage = makeReadFromStorage({
+      'ai-impact/features.json': makeFeaturesStore({}),
+      'releases/planning/config.json': { releases: { '3.6': { release: '3.6' } } },
+      'releases/execution/index.json': makeExecIndex([{
+        key: 'RHAISTRAT-DYN3',
+        summary: 'Exec Feature',
+        status: 'In Progress',
+        priority: 'Major',
+        assignee: null,
+        components: [],
+        labels: [],
+        targetVersions: ['rhoai-3.6'],
+        fixVersions: [],
+        team: null
+      }])
+    })
+
+    var result = buildFeatureReadiness(readFromStorage, null)
+    var feature = result.pendingReview.concat(result.ready).find(function(f) { return f.key === 'RHAISTRAT-DYN3' })
+    expect(feature).toBeDefined()
+    expect(feature.violations).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// computeHygieneStatus
+// ---------------------------------------------------------------------------
+describe('computeHygieneStatus', function() {
+  it('returns unknown for null violations', function() {
+    expect(computeHygieneStatus(null)).toBe('unknown')
+  })
+
+  it('returns unknown for undefined violations', function() {
+    expect(computeHygieneStatus(undefined)).toBe('unknown')
+  })
+
+  it('returns unknown for non-array violations', function() {
+    expect(computeHygieneStatus('not-an-array')).toBe('unknown')
+  })
+
+  it('returns clean for empty violations array', function() {
+    expect(computeHygieneStatus([])).toBe('clean')
+  })
+
+  it('returns warning for non-blocking violations only', function() {
+    expect(computeHygieneStatus([{ id: 'some-minor-issue' }])).toBe('warning')
+  })
+
+  it('returns blocking when a blocking violation is present', function() {
+    expect(computeHygieneStatus([{ id: 'missing-assignee' }])).toBe('blocking')
+    expect(computeHygieneStatus([{ id: 'missing-fix-version' }])).toBe('blocking')
+    expect(computeHygieneStatus([{ id: 'missing-target-version' }])).toBe('blocking')
+    expect(computeHygieneStatus([{ id: 'open-children-on-closed' }])).toBe('blocking')
+  })
+
+  it('returns blocking when mix of blocking and non-blocking', function() {
+    expect(computeHygieneStatus([
+      { id: 'some-minor-issue' },
+      { id: 'missing-assignee' }
+    ])).toBe('blocking')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// buildCanonicalKeySet
+// ---------------------------------------------------------------------------
+describe('buildCanonicalKeySet', function() {
+  it('builds union of keys from all sources', function() {
+    var jiraFeatures = new Map([['RHAISTRAT-1', {}], ['RHAISTRAT-2', {}]])
+    var aiReviewMap = { 'RHAISTRAT-2': {}, 'RHAISTRAT-3': {} }
+    var execFeatures = [{ key: 'RHAISTRAT-3' }, { key: 'RHAISTRAT-4' }]
+    var healthIndex = new Map([['RHAISTRAT-4', {}], ['RHAISTRAT-5', {}]])
+
+    var keys = buildCanonicalKeySet(jiraFeatures, aiReviewMap, execFeatures, healthIndex)
+    expect(keys.size).toBe(5)
+    expect(keys.has('RHAISTRAT-1')).toBe(true)
+    expect(keys.has('RHAISTRAT-2')).toBe(true)
+    expect(keys.has('RHAISTRAT-3')).toBe(true)
+    expect(keys.has('RHAISTRAT-4')).toBe(true)
+    expect(keys.has('RHAISTRAT-5')).toBe(true)
+  })
+
+  it('handles null jiraFeatures', function() {
+    var aiReviewMap = { 'RHAISTRAT-1': {} }
+    var execFeatures = [{ key: 'RHAISTRAT-2' }]
+    var healthIndex = new Map()
+
+    var keys = buildCanonicalKeySet(null, aiReviewMap, execFeatures, healthIndex)
+    expect(keys.size).toBe(2)
+  })
+
+  it('handles all empty sources', function() {
+    var keys = buildCanonicalKeySet(null, {}, [], new Map())
+    expect(keys.size).toBe(0)
+  })
+
+  it('deduplicates keys across sources', function() {
+    var jiraFeatures = new Map([['RHAISTRAT-1', {}]])
+    var aiReviewMap = { 'RHAISTRAT-1': {} }
+    var execFeatures = [{ key: 'RHAISTRAT-1' }]
+    var healthIndex = new Map([['RHAISTRAT-1', {}]])
+
+    var keys = buildCanonicalKeySet(jiraFeatures, aiReviewMap, execFeatures, healthIndex)
+    expect(keys.size).toBe(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// mergeFeatureData
+// ---------------------------------------------------------------------------
+describe('mergeFeatureData', function() {
+  it('prefers Jira data for status, priority, targetVersions', function() {
+    var jiraFeatures = new Map([['K-1', { summary: 'Jira Title', status: 'In Progress', priority: 'Blocker', targetVersions: ['3.6'], fixVersions: ['3.6'], labels: [], components: [] }]])
+    var aiReviewMap = { 'K-1': { latest: { title: 'AI Title', status: 'New', priority: 'Minor', labels: [] } } }
+    var healthIndex = new Map([['K-1', { summary: 'Health Title', status: 'Refinement', priority: 'Major' }]])
+
+    var result = mergeFeatureData('K-1', jiraFeatures, aiReviewMap, new Map(), healthIndex, new Map(), new Map(), new Map())
+    expect(result.title).toBe('Jira Title')
+    expect(result.status).toBe('In Progress')
+    expect(result.priority).toBe('Blocker')
+    expect(result.targetVersions).toEqual(['3.6'])
+    expect(result.fixVersion).toBe('3.6')
+  })
+
+  it('falls back through resolution chain when Jira is absent', function() {
+    var aiReviewMap = { 'K-1': { latest: { title: 'AI Title', status: 'New', priority: 'Minor', labels: [], scores: { feasibility: 2 }, reviewers: {} } } }
+    var healthIndex = new Map([['K-1', { summary: 'Health Title', status: 'Refinement' }]])
+
+    var result = mergeFeatureData('K-1', null, aiReviewMap, new Map(), healthIndex, new Map(), new Map(), new Map())
+    expect(result.title).toBe('AI Title')
+    expect(result.status).toBe('New')
+    expect(result.priority).toBe('Minor')
+    expect(result.dataSource).toBe('strat-creator')
+  })
+
+  it('derives dataSource correctly', function() {
+    var healthIndex = new Map([['K-1', { summary: 'H' }]])
+    var r1 = mergeFeatureData('K-1', null, { 'K-1': { latest: { labels: [] } } }, new Map(), healthIndex, new Map(), new Map(), new Map())
+    expect(r1.dataSource).toBe('strat-creator')
+
+    var r2 = mergeFeatureData('K-1', null, {}, new Map(), healthIndex, new Map(), new Map(), new Map())
+    expect(r2.dataSource).toBe('health-pipeline')
+
+    var jira = new Map([['K-1', { summary: 'J', status: 'New' }]])
+    var r3 = mergeFeatureData('K-1', jira, {}, new Map(), new Map(), new Map(), new Map(), new Map())
+    expect(r3.dataSource).toBe('jira')
+
+    var exec = new Map([['K-1', { summary: 'E', key: 'K-1' }]])
+    var r4 = mergeFeatureData('K-1', null, {}, new Map(), new Map(), new Map(), new Map(), exec)
+    expect(r4.dataSource).toBe('execution')
+  })
+
+  it('computes hygieneStatus from violations', function() {
+    var hygieneIndex = new Map([['K-1', [{ id: 'missing-assignee' }]]])
+    var r1 = mergeFeatureData('K-1', null, {}, new Map(), new Map(), hygieneIndex, new Map(), new Map())
+    expect(r1.hygieneStatus).toBe('blocking')
+
+    var r2 = mergeFeatureData('K-2', null, {}, new Map(), new Map(), new Map(), new Map(), new Map())
+    expect(r2.hygieneStatus).toBe('unknown')
+  })
+
+  it('merges scores from aiReview only', function() {
+    var aiReviewMap = { 'K-1': { latest: { scores: { feasibility: 2, testability: 1, scope: 2, architecture: 1 }, labels: [] } } }
+    var result = mergeFeatureData('K-1', null, aiReviewMap, new Map(), new Map(), new Map(), new Map(), new Map())
+    expect(result.rubricTotal).toBe(6)
+    expect(result.scores.feasibility).toBe(2)
+  })
+
+  it('returns rubricTotal 0 when no aiReview', function() {
+    var result = mergeFeatureData('K-1', null, {}, new Map(), new Map(), new Map(), new Map(), new Map())
+    expect(result.rubricTotal).toBe(0)
+    expect(result.scores).toEqual({})
+  })
+
+  it('resolves fixVersion from exec when no other source', function() {
+    var exec = new Map([['K-1', { key: 'K-1', fixVersions: ['3.6'], labels: [] }]])
+    var result = mergeFeatureData('K-1', null, {}, new Map(), new Map(), new Map(), new Map(), exec)
+    expect(result.fixVersion).toBe('3.6')
+  })
+
+  it('resolves targetVersions from exec when no other source', function() {
+    var exec = new Map([['K-1', { key: 'K-1', targetVersions: ['4.0'], labels: [] }]])
+    var result = mergeFeatureData('K-1', null, {}, new Map(), new Map(), new Map(), new Map(), exec)
+    expect(result.targetVersions).toEqual(['4.0'])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// buildFeatureReadiness — single-pass data merging
+// ---------------------------------------------------------------------------
+describe('buildFeatureReadiness — single-pass merging', function() {
+  var CONFIG_3_6 = { releases: { '3.6': { release: '3.6' } } }
+
+
+
+  it('feature with aiReview + Jira gets rubric scores AND Jira status', function() {
+    var store = makeFeaturesStore({
+      'RHAISTRAT-1': { latest: makeLatest({ status: 'OldStatus', humanReviewStatus: 'approved' }) }
+    })
+    var jiraFeatures = new Map([['RHAISTRAT-1', {
+      summary: 'Jira Summary',
+      status: 'In Progress',
+      priority: 'Critical',
+      targetVersions: ['3.6'],
+      fixVersions: [],
+      labels: ['strat-creator-human-sign-off'],
+      components: [],
+      assignee: 'Bob',
+      pmOwner: 'Alice'
+    }]])
+
+    var readFromStorage = makeReadFromStorage({
+      ...convertToUnifiedFormat(store),
+      'releases/planning/config.json': CONFIG_3_6
+    })
+    var result = buildFeatureReadiness(readFromStorage, jiraFeatures)
+
+    var all = result.pendingReview.concat(result.ready)
+    var feature = all.find(function(f) { return f.key === 'RHAISTRAT-1' })
+    expect(feature).toBeDefined()
+    expect(feature.status).toBe('In Progress')
+    expect(feature.priority).toBe('Critical')
+    expect(feature.rubricTotal).toBe(8)
+    expect(feature.dataSource).toBe('strat-creator')
+  })
+
+  it('feature with only Jira data appears on list', function() {
+    var store = makeFeaturesStore({})
+    var jiraFeatures = new Map([['RHAISTRAT-JIRA', {
+      summary: 'Jira Only Feature',
+      status: 'In Progress',
+      priority: 'Major',
+      targetVersions: ['3.6'],
+      fixVersions: [],
+      labels: [],
+      components: ['Backend'],
+      assignee: 'Bob'
+    }]])
+
+    var readFromStorage = makeReadFromStorage({
+      ...convertToUnifiedFormat(store),
+      'releases/planning/config.json': CONFIG_3_6
+    })
+    var result = buildFeatureReadiness(readFromStorage, jiraFeatures)
+    var feature = result.pendingReview.concat(result.ready).find(function(f) { return f.key === 'RHAISTRAT-JIRA' })
+    expect(feature).toBeDefined()
+    expect(feature.dataSource).toBe('jira')
+    expect(feature.status).toBe('In Progress')
+    expect(feature.components).toEqual(['Backend'])
+  })
+
+  it('feature with null hygiene shows hygieneStatus unknown', function() {
+    var store = makeFeaturesStore({
+      'RHAISTRAT-1': { latest: makeLatest() }
+    })
+    var readFromStorage = makeReadFromStorage({
+      ...convertToUnifiedFormat(store),
+      'releases/planning/config.json': CONFIG_3_6,
+      'releases/planning/candidates-cache-3.6.json': {
+        data: { features: [{ issueKey: 'RHAISTRAT-1', tier: 1, targetRelease: '3.6' }] }
+      }
+    })
+    var result = buildFeatureReadiness(readFromStorage)
+    var feature = result.pendingReview.concat(result.ready).find(function(f) { return f.key === 'RHAISTRAT-1' })
+    expect(feature.hygieneStatus).toBe('unknown')
+    expect(feature.violations).toBeNull()
+  })
+
+  it('meta includes jiraAvailable flag', function() {
+    var store = makeFeaturesStore({})
+    var readFromStorage = makeReadFromStorage(convertToUnifiedFormat(store))
+
+    var r1 = buildFeatureReadiness(readFromStorage, null)
+    expect(r1.meta.jiraAvailable).toBe(false)
+
+    var r2 = buildFeatureReadiness(readFromStorage, new Map())
+    expect(r2.meta.jiraAvailable).toBe(true)
+  })
+
+  it('no feature is excluded — all sources contribute to canonical set', function() {
+    var store = makeFeaturesStore({
+      'RHAISTRAT-AI': { latest: makeLatest() }
+    })
+    var jiraFeatures = new Map([['RHAISTRAT-JIRA', {
+      summary: 'Jira Feature', status: 'In Progress', priority: 'Major',
+      targetVersions: [], fixVersions: [], labels: [], components: []
+    }]])
+
+    var readFromStorage = makeReadFromStorage({
+      ...convertToUnifiedFormat(store),
+      'releases/planning/config.json': CONFIG_3_6,
+      'releases/planning/health-cache-3.6-all.json': {
+        features: [{ key: 'RHAISTRAT-HEALTH', summary: 'Health Feature', status: 'In Progress', priority: 'Major' }]
+      },
+      'releases/planning/candidates-cache-3.6.json': {
+        data: { features: [
+          { issueKey: 'RHAISTRAT-AI', tier: 1, targetRelease: '3.6' },
+          { issueKey: 'RHAISTRAT-HEALTH', tier: 2, targetRelease: '3.6' }
+        ]}
+      }
+    })
+
+    var result = buildFeatureReadiness(readFromStorage, jiraFeatures)
+    var allKeys = result.pendingReview.concat(result.ready).map(function(f) { return f.key })
+    expect(allKeys).toContain('RHAISTRAT-AI')
+    expect(allKeys).toContain('RHAISTRAT-JIRA')
+    expect(allKeys).toContain('RHAISTRAT-HEALTH')
   })
 })

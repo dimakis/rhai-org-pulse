@@ -613,6 +613,35 @@ Cached RFE issues fetched from Jira. The module's primary data file.
 - `linkedFeature` is resolved from Jira issue links (type = "Cloners", outward to RHAISTRAT project). Can be `null` if no link exists.
 - `labels` is the raw Jira label array, preserved for reference
 
+## AI Impact — RFE Metrics API Response (`GET /api/modules/ai-impact/rfe-data`)
+
+The `/rfe-data` endpoint returns computed metrics alongside the cached issue list. The `pipelineFriction` object surfaces friction signals from Jira pipeline labels that are already present on every issue.
+
+```json
+{
+  "pipelineFriction": {
+    "needsAttentionPct": 18,
+    "needsAttentionChange": 3,
+    "needsAttentionTrend": "worsening",
+    "feasibilityBlockedPct": 9,
+    "feasibilityBlockedChange": -2,
+    "feasibilityBlockedTrend": "improving"
+  }
+}
+```
+
+**Fields:**
+- `needsAttentionPct`: % of AI-touched RFEs in the selected window with label `rfe-creator-needs-attention`
+- `needsAttentionChange`: percentage-point change vs the prior period (positive = more friction)
+- `needsAttentionTrend`: `"improving"` | `"stable"` | `"worsening"` — based on `trendThresholdPp` config (default 2pp); lower is improving for friction metrics
+- `feasibilityBlockedPct`: % of AI-touched RFEs with `rfe-creator-feasibility-fail` **or** `rfe-creator-feasibility-unknown` (each issue counted once)
+- `feasibilityBlockedChange`: pp change vs prior period
+- `feasibilityBlockedTrend`: same trend classification as above
+
+**Denominator:** AI-touched RFEs only (`aiInvolvement !== 'none'`), filtered by `issue.created` within the time window. Manual RFEs the pipeline never processed are excluded.
+
+**UI:** `needsAttentionPct` / `needsAttentionChange` render as sub-text under the "Created with AI" tile; `feasibilityBlockedPct` / `feasibilityBlockedChange` under "Revised with AI".
+
 ## AI Impact — Assessments (`data/ai-impact/assessments.json`)
 
 Quality assessment data pushed from the rfe-quality-dashboard CI pipeline. Stores the latest assessment and score history for each RFE.
@@ -659,7 +688,13 @@ Quality assessment data pushed from the rfe-quality-dashboard CI pipeline. Store
 - The file is written atomically (write-to-temp-then-rename) to prevent corruption from mid-write crashes.
 - On DELETE, the file is written as `{ "lastSyncedAt": null, "totalAssessed": 0, "assessments": {} }` (never `null`).
 
-## AI Impact — Features (`data/ai-impact/features.json`)
+## AI Impact — Features (`data/ai-impact/features.json`) — DEPRECATED
+
+> **Deprecated.** Feature review data is now stored in the unified releases
+> execution store at `data/releases/execution/features/{KEY}.json` under the
+> `aiReview` namespace. See [Releases — Execution Feature Detail](#releases--execution-feature-detail-datareleasesexecutionfeatureskeysjson)
+> for the current schema. This legacy file is kept only as a migration source
+> and demo-mode fallback.
 
 Feature review data pushed from the strat creator pipeline. Stores the latest review and score history for each RHAISTRAT feature.
 
@@ -914,7 +949,9 @@ Derived summary index of all features in the unified feature store. Rebuilt auto
       "architect": "Architect Name",
       "parentKey": "RHAISTRAT-100",
       "colorStatus": "Green",
-      "ownerStatusColor": "Green"
+      "ownerStatusColor": "Green",
+      "team": "Model Serving",
+      "components": ["API", "Dashboard"]
     }
   ]
 }
@@ -924,6 +961,7 @@ Derived summary index of all features in the unified feature store. Rebuilt auto
 - `assignee` is a string in the index (flattened from the detail object shape)
 - `colorStatus` and `ownerStatusColor` are identical (backward compat alias)
 - `pm` is flattened to a string from the detail object shape
+- `team` and `components` are Jira-sourced fields surfaced in the index for filtering
 - Metrics fields (`completionPct`, `epicCount`, etc.) are derived from the detail `metrics` object
 
 ## Releases — Execution Feature Detail (`data/releases/execution/features/{KEY}.json`)
@@ -991,6 +1029,68 @@ Unified per-feature file combining data from pipeline (GitLab CI), Jira enrichme
 - `_sources` timestamps indicate data freshness per source; features with only `pipeline` have not been Jira-enriched yet
 - `statusNotes` (pipeline) and `statusSummary` (Jira) are different fields with different formats
 - Jira-owned fields are authoritative when present; pipeline-owned fields (`metrics`, `topology`) are preserved across Jira syncs
+- `aiReview` is optional; only present for features that have been scored by the AI review pipeline
+
+**Optional — AI Review (`aiReview`):**
+
+AI review scores and metadata pushed by the strat-creator pipeline via the AI Impact module. Stored under a single `aiReview` namespace to avoid field collisions. `humanReviewStatus` is derived from Jira labels during enrichment; sign-off details (`approvedBy`, `approvedAt`) are backfilled from the Jira changelog.
+
+```json
+{
+  "aiReview": {
+    "title": "Feature title from AI pipeline",
+    "sourceRfe": "RHAIRFE-456",
+    "size": "M",
+    "recommendation": "approve",
+    "needsAttention": false,
+    "humanReviewStatus": "approved",
+    "approvedBy": "Jane Doe",
+    "approvedAt": "2026-06-01T00:00:00Z",
+    "scores": {
+      "feasibility": 2,
+      "testability": 1,
+      "scope": 2,
+      "architecture": 2,
+      "total": 7
+    },
+    "reviewers": {
+      "feasibility": "approve",
+      "testability": "revise",
+      "scope": "approve",
+      "architecture": "approve"
+    },
+    "labels": ["strat-creator-auto-created", "strat-creator-human-sign-off"],
+    "reviewedAt": "2026-05-15T00:00:00Z",
+    "runId": "run-abc-123",
+    "history": [
+      {
+        "scores": { "feasibility": 1, "testability": 1, "scope": 2, "architecture": 1, "total": 5 },
+        "recommendation": "revise",
+        "needsAttention": true,
+        "humanReviewStatus": "awaiting-review",
+        "reviewedAt": "2026-05-01T00:00:00Z"
+      }
+    ]
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `title` | string | AI pipeline's title (may differ from Jira `summary`) |
+| `sourceRfe` | string | Source RFE key (e.g. `RHAIRFE-456`) |
+| `size` | `S\|M\|L\|XL\|null` | T-shirt size estimate |
+| `recommendation` | `approve\|revise\|reject` | Overall recommendation |
+| `needsAttention` | boolean | Whether human attention is needed |
+| `humanReviewStatus` | `approved\|needs-review\|awaiting-review` | Derived from Jira labels |
+| `approvedBy` | string\|null | Who added the sign-off label |
+| `approvedAt` | string\|null | When the sign-off label was added |
+| `scores` | object | Per-dimension scores (0-2) plus `total` (0-8) |
+| `reviewers` | object | Per-dimension verdicts (`approve\|revise\|reject`) |
+| `labels` | string[] | Label snapshot from the AI pipeline push |
+| `reviewedAt` | string | ISO 8601 timestamp of this review |
+| `runId` | string | Pipeline run identifier |
+| `history` | array | Previous review snapshots (max 20, newest first) |
 
 **Optional — Traffic Signals (`trafficSignals`):**
 
@@ -1197,7 +1297,7 @@ JSON Lines format (one JSON object per line). Partitioned by month for efficient
       "views": 342,
       "uniqueUsers": 28,
       "byUserType": { "Backend": 12, "Frontend": 8, "unknown": 3 },
-      "byRole": { "admin": 3, "team-admin": 2, "release-manager": 5 },
+      "byRole": { "admin": 3, "team-admin": 2, "planning-manager": 5 },
       "byPermissionTier": { "admin": 3, "manager": 10, "user": 15 }
     }
   }
@@ -1220,6 +1320,63 @@ JSON Lines format (one JSON object per line). Partitioned by month for efficient
   "emails": ["user-who-opted-out@redhat.com"]
 }
 ```
+
+---
+
+## Releases — Hygiene Features (`data/releases/hygiene/features-{version}.json`)
+
+Per-release hygiene compliance data. Generated by the hygiene refresh handler, which fetches features from Jira and evaluates them against enabled hygiene rules.
+
+```json
+{
+  "fetchedAt": "2026-05-19T06:00:00.000Z",
+  "version": "RHOAI 2.14",
+  "features": {
+    "RHAISTRAT-1045": {
+      "key": "RHAISTRAT-1045",
+      "summary": "Enable GPU autoscaling for model serving",
+      "issueType": "Feature",
+      "status": "In Progress",
+      "statusCategory": "In Progress",
+      "assignee": "Jane Doe",
+      "team": "Model Serving",
+      "fixVersions": ["RHOAI-2.14"],
+      "components": ["serving-runtime"],
+      "labels": ["GPU-as-a-Service"],
+      "releaseType": "GA",
+      "statusSummary": "GPU autoscaling feature is progressing well.",
+      "colorStatus": "Green",
+      "docsRequired": "Yes",
+      "targetEnd": "2026-06-15",
+      "riceStatus": "complete",
+      "riceScore": 42,
+      "linkedRfeKey": "RHAIRFE-100",
+      "linkedRfeApproved": true,
+      "statusEnteredAt": "2026-04-15T10:00:00.000Z",
+      "statusSummaryUpdated": "2026-05-10T10:00:00.000Z",
+      "violations": [
+        {
+          "id": "missing-color-status",
+          "name": "Missing Color Status",
+          "category": "metadata",
+          "message": "This issue is in In Progress but has no color status set.",
+          "remediation": "Open the issue in Jira and set the Color Status field."
+        }
+      ]
+    }
+  }
+}
+```
+
+**Notes:**
+- `features` is keyed by Jira issue key (not an array)
+- `team` may be `null` when unassigned; `components` may be `[]`
+- `assignee` is a display name string or `null`
+- `violations` is an array of rule violations found by `evaluateHygiene()`. Empty array `[]` when the feature passes all rules
+- Each violation has: `id` (rule identifier, e.g. `"missing-assignee"`), `name` (human label), `category` (`"ownership"`, `"timeliness"`, `"metadata"`, or `"lifecycle"`), `message` (contextual sentence), `remediation` (action guidance)
+- `statusEnteredAt` and `statusSummaryUpdated` are ISO 8601 timestamps used by timeliness rules
+- `linkedRfeApproved` is `true` only when the feature has a `clones` link to an RFE in Approved status
+- File path uses the version display name (may contain spaces, e.g. `features-RHOAI 2.14.json`)
 
 ---
 

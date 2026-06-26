@@ -7,7 +7,7 @@ const props = defineProps({
   jiraBaseUrl: { type: String, default: 'https://issues.redhat.com/browse' }
 })
 
-const emit = defineEmits(['close'])
+const emit = defineEmits(['close', 'navigate'])
 
 const open = computed(() => props.feature !== null)
 
@@ -151,6 +151,13 @@ const violationsList = computed(() => props.feature?.violations || [])
 const violationCount = computed(() => violationsList.value.length)
 
 const hygieneExpanded = ref(true)
+const breakdownExpanded = ref(false)
+
+const scoreBreakdown = computed(() => {
+  const bd = props.feature?.priorityScoreBreakdown
+  if (!bd || !bd.signals) return null
+  return bd
+})
 
 function onKey(e) {
   if (e.key === 'Escape' && open.value) emit('close')
@@ -183,13 +190,25 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         <!-- Header -->
         <div class="px-4 pt-4 pb-3 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/60 shrink-0">
           <div class="flex items-start gap-2">
-            <a
-              :href="`${jiraBaseUrl}/${feature.key}`"
-              target="_blank"
-              rel="noopener noreferrer"
-              class="font-mono text-xs font-bold text-primary-600 dark:text-blue-400 hover:underline shrink-0 mt-0.5"
-              @click.stop
-            >{{ feature.key }}</a>
+            <span class="inline-flex items-center gap-1 shrink-0 mt-0.5">
+              <button
+                type="button"
+                class="font-mono text-xs font-bold text-primary-600 dark:text-blue-400 hover:underline"
+                @click.stop="emit('navigate', feature.key)"
+              >{{ feature.key }}</button>
+              <a
+                :href="`${jiraBaseUrl}/${feature.key}`"
+                target="_blank"
+                rel="noopener noreferrer"
+                :aria-label="`Open ${feature.key} in Jira`"
+                class="text-gray-400 dark:text-gray-500 hover:text-primary-600 dark:hover:text-blue-400 transition-colors"
+                @click.stop
+              >
+                <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                </svg>
+              </a>
+            </span>
             <p class="flex-1 text-sm font-semibold text-gray-900 dark:text-gray-100 leading-snug">
               {{ feature.title || '—' }}
             </p>
@@ -267,41 +286,105 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
             </div>
           </section>
 
+          <!-- Score Breakdown -->
+          <section v-if="scoreBreakdown" class="px-4 py-4">
+            <button
+              type="button"
+              class="w-full flex items-center justify-between text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wide mb-3 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+              @click="breakdownExpanded = !breakdownExpanded"
+            >
+              <span class="flex items-center gap-2">
+                Score Breakdown
+                <span
+                  v-if="scoreBreakdown.completenessMultiplier < 1"
+                  class="inline-flex items-center justify-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+                >{{ scoreBreakdown.signalCount }}/{{ scoreBreakdown.maxSignals }} signals</span>
+              </span>
+              <svg
+                class="w-3.5 h-3.5 transition-transform"
+                :class="breakdownExpanded ? 'rotate-180' : ''"
+                fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"
+              >
+                <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+            <div v-if="breakdownExpanded" class="space-y-3">
+              <div v-for="signal in scoreBreakdown.signals" :key="signal.name" class="space-y-1">
+                <div class="flex items-center justify-between text-xs">
+                  <span class="text-gray-700 dark:text-gray-300">{{ signal.name }}</span>
+                  <span class="text-gray-400 dark:text-gray-500 tabular-nums">{{ Math.round(signal.value * 100) }}% &times; {{ signal.weight }}w</span>
+                </div>
+                <div class="h-1.5 rounded-full bg-gray-100 dark:bg-gray-800 overflow-hidden">
+                  <div
+                    class="h-full rounded-full bg-gradient-to-r from-primary-500 to-purple-500 transition-all"
+                    :style="{ width: Math.round(signal.value * 100) + '%' }"
+                  />
+                </div>
+              </div>
+              <div v-if="scoreBreakdown.completenessMultiplier < 1" class="pt-2 border-t border-gray-100 dark:border-gray-800">
+                <p class="text-xs text-amber-600 dark:text-amber-400">
+                  Raw score {{ scoreBreakdown.rawScore }} &times; {{ scoreBreakdown.completenessMultiplier }} completeness
+                  = {{ scoreBreakdown.score }}
+                </p>
+              </div>
+              <div v-if="scoreBreakdown.missing && scoreBreakdown.missing.length > 0" class="text-xs text-gray-400 dark:text-gray-500">
+                Missing: {{ scoreBreakdown.missing.join(', ') }}
+              </div>
+            </div>
+          </section>
+
           <!-- Readiness Gates -->
           <section v-if="readinessGates" class="px-4 py-4">
             <p class="text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wide mb-3">Readiness Gates</p>
             <div class="space-y-2">
               <div class="flex items-center gap-2 text-xs">
-                <span :class="readinessGates.ownerAssigned ? 'text-green-600 dark:text-green-400' : 'text-red-500 dark:text-red-400'">
-                  {{ readinessGates.ownerAssigned ? '●' : '○' }}
+                <span :class="readinessGates.isApproved ? 'text-green-600 dark:text-green-400' : 'text-red-500 dark:text-red-400'">
+                  {{ readinessGates.isApproved ? '●' : '○' }}
                 </span>
-                <span class="text-gray-700 dark:text-gray-300">Owner assigned</span>
-                <span v-if="feature.deliveryOwner" class="text-gray-400 dark:text-gray-500 ml-auto">{{ feature.deliveryOwner }}</span>
+                <span class="text-gray-700 dark:text-gray-300">Approved</span>
+                <span class="text-gray-400 dark:text-gray-500 ml-auto">{{ readinessGates.isApproved ? 'Approved' : 'Awaiting sign-off' }}</span>
               </div>
               <div class="flex items-center gap-2 text-xs">
-                <span :class="readinessGates.notBlocked ? 'text-green-600 dark:text-green-400' : 'text-red-500 dark:text-red-400'">
-                  {{ readinessGates.notBlocked ? '●' : '○' }}
+                <span :class="readinessGates.hasRubric ? 'text-green-600 dark:text-green-400' : 'text-red-500 dark:text-red-400'">
+                  {{ readinessGates.hasRubric ? '●' : '○' }}
                 </span>
-                <span class="text-gray-700 dark:text-gray-300">No blockers</span>
+                <span class="text-gray-700 dark:text-gray-300">Rubric</span>
+                <span class="text-gray-400 dark:text-gray-500 ml-auto">{{ readinessGates.hasRubric ? rubricTotal + '/8' : 'Not scored' }}</span>
+              </div>
+              <div class="flex items-center gap-2 text-xs">
+                <span :class="readinessGates.pmAssigned ? 'text-green-600 dark:text-green-400' : 'text-red-500 dark:text-red-400'">
+                  {{ readinessGates.pmAssigned ? '●' : '○' }}
+                </span>
+                <span class="text-gray-700 dark:text-gray-300">Product Manager</span>
+                <span class="text-gray-400 dark:text-gray-500 ml-auto">{{ feature.pmOwner || 'Missing' }}</span>
+              </div>
+              <div class="flex items-center gap-2 text-xs">
+                <span :class="readinessGates.deliveryOwnerAssigned ? 'text-green-600 dark:text-green-400' : 'text-red-500 dark:text-red-400'">
+                  {{ readinessGates.deliveryOwnerAssigned ? '●' : '○' }}
+                </span>
+                <span class="text-gray-700 dark:text-gray-300">Delivery Owner</span>
+                <span class="text-gray-400 dark:text-gray-500 ml-auto">{{ feature.deliveryOwner || 'Missing' }}</span>
               </div>
               <div class="flex items-center gap-2 text-xs">
                 <span :class="readinessGates.pastRefinement ? 'text-green-600 dark:text-green-400' : 'text-red-500 dark:text-red-400'">
                   {{ readinessGates.pastRefinement ? '●' : '○' }}
                 </span>
-                <span class="text-gray-700 dark:text-gray-300">Status beyond Refinement</span>
-                <span v-if="feature.status" class="text-gray-400 dark:text-gray-500 ml-auto">{{ feature.status }}</span>
+                <span class="text-gray-700 dark:text-gray-300">Status</span>
+                <span class="text-gray-400 dark:text-gray-500 ml-auto">{{ feature.status || 'Unknown' }}</span>
               </div>
               <div class="flex items-center gap-2 text-xs">
                 <span :class="readinessGates.hasTargetVersion ? 'text-green-600 dark:text-green-400' : 'text-red-500 dark:text-red-400'">
                   {{ readinessGates.hasTargetVersion ? '●' : '○' }}
                 </span>
-                <span class="text-gray-700 dark:text-gray-300">Target version assigned</span>
+                <span class="text-gray-700 dark:text-gray-300">Target Version</span>
+                <span class="text-gray-400 dark:text-gray-500 ml-auto">{{ (feature.targetVersions || []).length ? feature.targetVersions.join(', ') : 'Missing' }}</span>
               </div>
               <div class="flex items-center gap-2 text-xs">
-                <span :class="readinessGates.noBlockingViolations ? 'text-green-600 dark:text-green-400' : 'text-red-500 dark:text-red-400'">
-                  {{ readinessGates.noBlockingViolations ? '●' : '○' }}
+                <span :class="feature.hygieneStatus === 'unknown' ? 'text-amber-500 dark:text-amber-400' : (readinessGates.noBlockingViolations ? 'text-green-600 dark:text-green-400' : 'text-red-500 dark:text-red-400')">
+                  {{ feature.hygieneStatus === 'unknown' ? '○' : (readinessGates.noBlockingViolations ? '●' : '○') }}
                 </span>
-                <span class="text-gray-700 dark:text-gray-300">No blocking hygiene violations</span>
+                <span class="text-gray-700 dark:text-gray-300">Hygiene</span>
+                <span class="text-gray-400 dark:text-gray-500 ml-auto">{{ feature.hygieneStatus === 'unknown' ? 'Unknown' : (readinessGates.noBlockingViolations ? 'All clear' : violationCount + ' violations') }}</span>
               </div>
             </div>
           </section>
@@ -320,6 +403,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
                   class="inline-flex items-center justify-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300"
                 >{{ violationCount }}</span>
                 <span
+                  v-else-if="feature && feature.hygieneStatus === 'unknown'"
+                  class="inline-flex items-center justify-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400"
+                >Unknown</span>
+                <span
                   v-else
                   class="inline-flex items-center justify-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300"
                 >All clear</span>
@@ -333,7 +420,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
               </svg>
             </button>
             <div v-if="hygieneExpanded">
-              <HygieneViolations :violations="violationsList" />
+              <HygieneViolations :violations="violationsList" :feature-key="feature?.key" :jira-base-url="jiraBaseUrl" />
             </div>
           </section>
 
@@ -454,6 +541,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
               <dt class="text-gray-400 dark:text-gray-500">Team</dt>
               <dd class="text-gray-700 dark:text-gray-300">{{ feature.team || '—' }}</dd>
+
+              <template v-if="feature.pmOwner">
+                <dt class="text-gray-400 dark:text-gray-500">Product Manager</dt>
+                <dd class="text-gray-700 dark:text-gray-300">{{ feature.pmOwner }}</dd>
+              </template>
 
               <template v-if="feature.deliveryOwner">
                 <dt class="text-gray-400 dark:text-gray-500">Delivery Owner</dt>

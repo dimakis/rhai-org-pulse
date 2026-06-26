@@ -8,7 +8,7 @@ const props = defineProps({
   index: { type: Number, default: null }
 })
 
-const emit = defineEmits(['select'])
+const emit = defineEmits(['select', 'navigate'])
 
 const isHealthPipeline = computed(() => props.feature.dataSource === 'health-pipeline')
 
@@ -30,28 +30,16 @@ function recommendationLabel(rec) {
   }
 }
 
-function reviewStatusClass(status) {
-  switch (status) {
-    case 'approved':        return 'bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-200'
-    case 'needs-review':    return 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200'
-    case 'awaiting-review': return 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-200'
-    default:                return 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300'
-  }
-}
-
-function reviewStatusLabel(status) {
-  switch (status) {
-    case 'approved':        return 'Approved'
-    case 'needs-review':    return 'Flagged'
-    case 'awaiting-review': return 'Awaiting Sign-off'
-    default:                return 'Awaiting Sign-off'
-  }
-}
-
 const priorityDisplay = computed(() => {
   const score = props.feature.effectivePriorityScore
   if (score == null) return '—'
   return props.feature.priorityScoreFallback ? `~${score}` : String(score)
+})
+
+const scoreBreakdown = computed(() => {
+  const bd = props.feature.priorityScoreBreakdown
+  if (!bd || !bd.signals) return null
+  return bd
 })
 
 const confidenceClass = computed(() => {
@@ -95,13 +83,34 @@ const confidenceTooltip = computed(() => {
 
     <!-- Score -->
     <td class="px-3 py-2.5 whitespace-nowrap text-center">
-      <span
-        class="text-xs font-semibold tabular-nums"
-        :class="feature.priorityScoreFallback
-          ? 'text-amber-600 dark:text-amber-400'
-          : 'text-gray-800 dark:text-gray-200'"
-        :title="feature.priorityScoreFallback ? 'Estimated score (fallback)' : 'Computed priority score'"
-      >{{ priorityDisplay }}</span>
+      <span class="relative group inline-flex items-center">
+        <span
+          class="text-xs font-semibold tabular-nums cursor-help"
+          :class="feature.priorityScoreFallback
+            ? 'text-amber-600 dark:text-amber-400'
+            : 'text-gray-800 dark:text-gray-200'"
+        >{{ priorityDisplay }}</span>
+        <div
+          v-if="scoreBreakdown"
+          class="absolute z-50 top-full mt-1 left-1/2 -translate-x-1/2 w-56 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg p-3 text-xs text-left font-normal hidden group-hover:block"
+        >
+          <p class="font-semibold text-gray-700 dark:text-gray-200 mb-1.5">
+            Score: {{ scoreBreakdown.score }} / 100
+          </p>
+          <div class="space-y-1">
+            <div v-for="signal in scoreBreakdown.signals" :key="signal.name" class="flex items-center justify-between">
+              <span class="text-gray-600 dark:text-gray-300">{{ signal.name }}</span>
+              <span class="text-gray-400 dark:text-gray-500 tabular-nums">{{ Math.round(signal.value * 100) }}% &times; {{ signal.weight }}w</span>
+            </div>
+          </div>
+          <div v-if="scoreBreakdown.completenessMultiplier < 1" class="mt-1.5 pt-1.5 border-t border-gray-100 dark:border-gray-700 text-gray-400 dark:text-gray-500">
+            Raw {{ scoreBreakdown.rawScore }} &times; {{ scoreBreakdown.completenessMultiplier }} ({{ scoreBreakdown.signalCount }}/{{ scoreBreakdown.maxSignals }} signals)
+          </div>
+          <div v-if="scoreBreakdown.missing && scoreBreakdown.missing.length" class="mt-1 text-gray-400 dark:text-gray-500">
+            Missing: {{ scoreBreakdown.missing.join(', ') }}
+          </div>
+        </div>
+      </span>
     </td>
 
     <!-- Readiness (confidence-colored) -->
@@ -115,14 +124,26 @@ const confidenceTooltip = computed(() => {
 
     <!-- Key -->
     <td class="px-3 py-2.5 whitespace-nowrap">
-      <a
-        :href="`${jiraBaseUrl}/${feature.key}`"
-        target="_blank"
-        rel="noopener noreferrer"
-        :aria-label="`Open Jira issue ${feature.key} in new tab`"
-        class="font-mono text-xs font-medium text-primary-600 dark:text-blue-400 hover:underline hover:text-primary-700 dark:hover:text-blue-300 transition-colors"
-        @click.stop
-      >{{ feature.key }}</a>
+      <span class="inline-flex items-center gap-1">
+        <button
+          type="button"
+          :aria-label="`View feature details for ${feature.key}`"
+          class="font-mono text-xs font-medium text-primary-600 dark:text-blue-400 hover:underline hover:text-primary-700 dark:hover:text-blue-300 transition-colors"
+          @click.stop="emit('navigate', feature.key)"
+        >{{ feature.key }}</button>
+        <a
+          :href="`${jiraBaseUrl}/${feature.key}`"
+          target="_blank"
+          rel="noopener noreferrer"
+          :aria-label="`Open ${feature.key} in Jira`"
+          class="text-gray-400 dark:text-gray-500 hover:text-primary-600 dark:hover:text-blue-400 transition-colors"
+          @click.stop
+        >
+          <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+          </svg>
+        </a>
+      </span>
     </td>
 
     <!-- Title -->
@@ -180,8 +201,8 @@ const confidenceTooltip = computed(() => {
     </td>
 
     <!-- Team -->
-    <td class="px-3 py-2.5 whitespace-nowrap">
-      <span class="text-xs text-gray-700 dark:text-gray-300">{{ feature.team || '—' }}</span>
+    <td class="px-3 py-2.5 whitespace-nowrap max-w-[10rem]">
+      <span class="text-xs text-gray-700 dark:text-gray-300 block truncate" :title="feature.team || undefined">{{ feature.team || '—' }}</span>
     </td>
 
     <!-- Rubric (compact dots) -->
@@ -198,20 +219,9 @@ const confidenceTooltip = computed(() => {
       >{{ recommendationLabel(feature.recommendation) }}</span>
     </td>
 
-    <!-- Status -->
+    <!-- Status (Jira workflow status) -->
     <td class="px-3 py-2.5 whitespace-nowrap">
-      <template v-if="isHealthPipeline">
-        <span
-          class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
-          :class="confidenceClass"
-        >{{ confidenceLabel }}</span>
-      </template>
-      <template v-else>
-        <span
-          class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
-          :class="reviewStatusClass(feature.humanReviewStatus)"
-        >{{ reviewStatusLabel(feature.humanReviewStatus) }}</span>
-      </template>
+      <span class="text-xs text-gray-700 dark:text-gray-300">{{ feature.status || '—' }}</span>
     </td>
 
     <!-- Priority -->

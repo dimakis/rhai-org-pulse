@@ -5,6 +5,7 @@
  * Storage paths migrated to releases/execution/ (Phase 5).
  */
 
+const express = require('express');
 const scheduler = require('./scheduler');
 const {
   getToken,
@@ -15,8 +16,11 @@ const {
   setOnCadenceChange
 } = scheduler;
 const { logAudit } = require('../planning/audit-log');
+const { mergeAiReview } = require('./ai-review-merge');
+const { writeFeatures } = require('./feature-store');
 
 const DATA_PREFIX = 'releases/execution';
+const jsonLimit = express.json({ limit: '10mb' });
 
 function stripZStream(value) {
   if (!value) return value
@@ -313,6 +317,32 @@ module.exports = function registerExecutionRoutes(router, context) {
       result.nextScheduledFetch = nextFetch.toISOString();
     }
 
+    // Jira enrichment status
+    const jiraEnrichConfig = config.jiraEnrichment || {};
+    const lastEnrichment = readDataFile('last-enrichment.json');
+    result.jiraEnrichment = {
+      enabled: jiraEnrichConfig.enabled !== false,
+      jiraConfigured: !!jira,
+      lastSync: lastEnrichment || null
+    };
+    // Warn if Jira enrichment hasn't run in >24h (2x the default 6h cadence)
+    if (result.jiraEnrichment.enabled && jira) {
+      const enrichTs = lastEnrichment?.timestamp ? new Date(lastEnrichment.timestamp).getTime() : 0;
+      const enrichAgeMs = enrichTs ? Date.now() - enrichTs : Infinity;
+      const enrichAgeHours = enrichAgeMs / (1000 * 60 * 60);
+      if (enrichAgeHours > 24) {
+        result.jiraEnrichment.stale = true;
+        if (enrichTs === 0) {
+          result.jiraEnrichment.warning = 'Jira enrichment has never run';
+        } else {
+          const ageDays = Math.floor(enrichAgeHours / 24);
+          result.jiraEnrichment.warning = 'Last Jira sync was ' + (ageDays === 1 ? '1 day' : ageDays + ' days') + ' ago';
+        }
+      }
+    } else if (!jira) {
+      result.jiraEnrichment.warning = 'Jira client not configured — enrichment cannot run';
+    }
+
     res.json(result);
   });
 
@@ -386,18 +416,149 @@ module.exports = function registerExecutionRoutes(router, context) {
     }
   });
 
+  // ─── AI Review internal API ───
+
+  /**
+   * @openapi
+   * /api/modules/releases/execution/ai-review/bulk:
+   *   post:
+   *     summary: Bulk upsert AI review data into unified feature store
+   *     tags: [Releases - Execution]
+   *     requestBody:
+   *       required: true
+   *       content:
+   *         application/json:
+   *           schema:
+   *             type: object
+   *             properties:
+   *               features:
+   *                 type: array
+   *                 items:
+   *                   type: object
+   *                   properties:
+   *                     key: { type: string }
+   *                     aiReview: { type: object }
+   *     responses:
+   *       200:
+   *         description: Upsert results with created/updated/unchanged counts
+   */
+  router.post('/ai-review/bulk', context.requireAdmin, requireScope('releases:write'), jsonLimit, async function(req, res) {
+    const { features } = req.body;
+    if (!Array.isArray(features)) {
+      return res.status(400).json({ error: 'features must be an array' });
+    }
+    if (features.length > 5000) {
+      return res.status(400).json({ error: 'Bulk payload exceeds maximum of 5000 entries' });
+    }
+
+    try {
+      const counts = { created: 0, updated: 0, unchanged: 0, skipped: 0 };
+      const toWrite = [];
+
+      const KEY_RE = /^[A-Z][A-Z0-9]+-\d+$/;
+
+      for (let i = 0; i < features.length; i++) {
+        const entry = features[i];
+        if (!entry || !entry.key || !entry.aiReview) {
+          counts.skipped++;
+          continue;
+        }
+        if (!KEY_RE.test(entry.key)) {
+          counts.skipped++;
+          continue;
+        }
+
+        const existing = readDataFile('features/' + entry.key + '.json');
+        const { aiReview, status } = mergeAiReview(
+          existing ? existing.aiReview : null,
+          entry.aiReview
+        );
+
+        counts[status]++;
+
+        if (status !== 'unchanged') {
+          const feature = existing || { key: entry.key, summary: entry.aiReview.title || '' };
+          feature.aiReview = aiReview;
+          feature._sources = feature._sources || {};
+          feature._sources.aiReview = new Date().toISOString();
+          toWrite.push(feature);
+        }
+      }
+
+      if (toWrite.length > 0) {
+        await writeFeatures(storage, toWrite);
+      }
+
+      res.json(counts);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * @openapi
+   * /api/modules/releases/execution/ai-review:
+   *   delete:
+   *     summary: Remove AI review data from all features (async)
+   *     tags: [Releases - Execution]
+   *     responses:
+   *       200:
+   *         description: Deletion started
+   */
+  router.delete('/ai-review', context.requireAdmin, requireScope('releases:write'), function(req, res) {
+    res.json({ status: 'started', message: 'AI review data removal started' });
+
+    // Process in background
+    (async function() {
+      try {
+        const fileNames = storage.listStorageFiles(DATA_PREFIX + '/features');
+        if (!fileNames || fileNames.length === 0) return;
+
+        const toWrite = [];
+        for (let i = 0; i < fileNames.length; i++) {
+          if (!fileNames[i].endsWith('.json')) continue;
+          const feature = storage.readFromStorage(DATA_PREFIX + '/features/' + fileNames[i]);
+          if (feature && feature.aiReview) {
+            delete feature.aiReview;
+            if (feature._sources) {
+              delete feature._sources.aiReview;
+            }
+            toWrite.push(feature);
+          }
+        }
+
+        if (toWrite.length > 0) {
+          await writeFeatures(storage, toWrite);
+        }
+        console.log('[execution] Removed AI review data from ' + toWrite.length + ' features');
+      } catch (err) {
+        console.error('[execution] AI review data removal failed:', err.message);
+      }
+    })();
+  });
+
   // Diagnostics
   if (context.registerDiagnostics) {
     context.registerDiagnostics(async function() {
       const index = readDataFile('index.json');
       const lastFetch = readDataFile('last-fetch.json');
+      const lastEnrichment = readDataFile('last-enrichment.json');
+      const config = loadConfig(storage);
+      const jiraEnrichConfig = config.jiraEnrichment || {};
       return {
         dataAvailable: !!index,
         featureCount: index?.featureCount || 0,
         fetchedAt: index?.fetchedAt || null,
         schemaVersion: index?.schemaVersion || null,
         lastFetchStatus: lastFetch?.status || null,
-        configured: loadConfig(storage).enabled && !!getToken()
+        configured: config.enabled && !!getToken(),
+        jiraEnrichment: {
+          enabled: jiraEnrichConfig.enabled !== false,
+          jiraConfigured: !!jira,
+          lastSyncStatus: lastEnrichment?.status || null,
+          lastSyncTimestamp: lastEnrichment?.timestamp || null,
+          enrichedCount: lastEnrichment?.enrichedCount || 0
+        }
       };
     });
   }
@@ -442,8 +603,9 @@ module.exports = function registerExecutionRoutes(router, context) {
       const enrichmentHandler = async function() {
         const config = loadConfig(storage);
         const jiraEnrichConfig = config.jiraEnrichment || {};
-        if (!jiraEnrichConfig.enabled) {
-          return { status: 'skipped', message: 'Jira enrichment disabled' };
+        // Default to enabled — Jira enrichment should run unless explicitly disabled
+        if (jiraEnrichConfig.enabled === false) {
+          return { status: 'skipped', message: 'Jira enrichment disabled in config (jiraEnrichment.enabled = false)' };
         }
 
         const result = await syncAllFeatures(storage, jira.jiraRequest, jira.fetchAllJqlResults);

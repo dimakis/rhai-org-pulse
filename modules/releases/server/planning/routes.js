@@ -27,6 +27,7 @@ const { logAudit, getAuditLog, computeFieldDiff } = require('./audit-log')
 const { blockDuringImpersonation } = require('../../../../shared/server/auth')
 const healthRoutes = require('./health/health-routes')
 var { buildFeatureReadiness } = require('./feature-readiness')
+var { fetchFeatures } = require('./feature-query')
 
 const DEMO_MODE = process.env.DEMO_MODE === 'true'
 const DATA_PREFIX = 'releases/planning'
@@ -47,7 +48,7 @@ module.exports = function registerPlanningRoutes(router, context) {
   var smartsheetClient = context.smartsheet || require('../../../../shared/server/smartsheet')
   var jiraClient = context.jira || null
 
-  const { storage, requireAuth, requireAdmin, requireScope } = context
+  const { storage, requireAuth, requireAdmin, requirePlanningManager, requireScope } = context
   const { readFromStorage, writeToStorage } = storage
   const listStorageFiles = storage.listStorageFiles || null
   const deleteFromStorage = storage.deleteFromStorage || null
@@ -55,7 +56,7 @@ module.exports = function registerPlanningRoutes(router, context) {
   migrateConfig(readFromStorage, writeToStorage)
 
   // ─── PM User Auto-Migration ───
-  // Migrate pm-users.json entries to the central release-manager role.
+  // Migrate pm-users.json entries to the central planning-manager role.
   // This runs once on module startup; after migration the file is deleted.
   if (context.roleStore) {
     try {
@@ -64,12 +65,12 @@ module.exports = function registerPlanningRoutes(router, context) {
         var migrated = 0
         for (var mi = 0; mi < pmData.emails.length; mi++) {
           var email = pmData.emails[mi]
-          if (!context.roleStore.hasRole(email, 'release-manager')) {
-            context.roleStore.assignRole(email, 'release-manager')
+          if (!context.roleStore.hasRole(email, 'planning-manager')) {
+            context.roleStore.assignRole(email, 'planning-manager')
             migrated++
           }
         }
-        console.log('[releases/planning] Migrated ' + migrated + ' PM user(s) to release-manager role')
+        console.log('[releases/planning] Migrated ' + migrated + ' PM user(s) to planning-manager role')
         if (deleteFromStorage) {
           deleteFromStorage('releases/planning/pm-users.json')
           console.log('[releases/planning] Deleted pm-users.json after migration')
@@ -466,13 +467,77 @@ module.exports = function registerPlanningRoutes(router, context) {
    *       500:
    *         description: Internal error building readiness data
    */
-  router.get('/feature-readiness', requireAuth, requireScope('releases:read'), function(req, res) {
+  router.get('/feature-readiness', requireAuth, requireScope('releases:read'), async function(req, res) {
     try {
-      var result = buildFeatureReadiness(readFromStorage)
+      var jiraFeatures = null
+      if (jiraClient) {
+        try {
+          jiraFeatures = await fetchFeatures(jiraClient)
+          if (jiraFeatures.size === 0) jiraFeatures = null
+        } catch (jiraErr) {
+          console.warn('[releases/planning] Jira feature query failed, falling back to execution index:', jiraErr.message)
+        }
+      }
+      var result = buildFeatureReadiness(readFromStorage, jiraFeatures, listStorageFiles)
       res.json(result)
     } catch (err) {
       console.error('[releases/planning] Feature readiness build failed:', err.message)
       res.status(500).json({ error: 'Failed to build feature readiness data' })
+    }
+  })
+
+  /**
+   * @openapi
+   * /api/modules/releases/planning/bu-feedback:
+   *   get:
+   *     summary: List BU non-feature-ask issues from Jira
+   *     tags: [releases-planning]
+   *     security: [{ bearerAuth: [] }]
+   *     description: Queries Jira for issues labeled AIBU_Feedback, ordered by creation date descending.
+   *     responses:
+   *       200:
+   *         description: Array of BU feedback issues
+   *       503:
+   *         description: Jira client not configured
+   */
+  router.get('/bu-feedback', requireAuth, requireScope('releases:read'), async function(req, res) {
+    if (!jiraClient) {
+      return res.json({ issues: [], fetchedAt: new Date().toISOString(), warning: 'Jira not configured' })
+    }
+
+    try {
+      var jql = 'labels = "AIBU_Feedback" ORDER BY createdDate DESC'
+      var fields = 'summary,status,issuetype,assignee,reporter,priority,resolution,created,updated,duedate,components,fixVersions,labels'
+      var rawIssues = await jiraClient.fetchAllJqlResults(jql, fields, { maxResults: 100 })
+
+      var issues = []
+      for (var i = 0; i < rawIssues.length; i++) {
+        var raw = rawIssues[i]
+        var f = raw.fields || {}
+        issues.push({
+          key: raw.key,
+          summary: f.summary || '',
+          issueType: f.issuetype ? f.issuetype.name : '',
+          assignee: f.assignee ? f.assignee.displayName : 'Unassigned',
+          reporter: f.reporter ? f.reporter.displayName : '',
+          priority: f.priority ? f.priority.name : '',
+          status: f.status ? f.status.name : '',
+          statusCategory: f.status && f.status.statusCategory ? f.status.statusCategory.name : '',
+          resolution: f.resolution ? f.resolution.name : 'Unresolved',
+          created: f.created || null,
+          updated: f.updated || null,
+          dueDate: f.duedate || null,
+          components: (f.components || []).map(function(c) { return c.name }),
+          fixVersions: (f.fixVersions || []).map(function(v) { return v.name }),
+          labels: f.labels || [],
+          url: 'https://issues.redhat.com/browse/' + raw.key
+        })
+      }
+
+      res.json({ issues: issues, fetchedAt: new Date().toISOString() })
+    } catch (err) {
+      console.error('[releases/planning] BU feedback query failed:', err.message)
+      res.status(500).json({ error: 'Failed to fetch BU feedback issues' })
     }
   })
 
@@ -508,9 +573,41 @@ module.exports = function registerPlanningRoutes(router, context) {
    *         description: Permission flags
    */
   router.get('/permissions', requireAuth, requireScope('releases:read'), function(req, res) {
+    const isPlanningManager = req.isAdmin || req.isPlanningManager
     res.json({
-      canEdit: true
+      canEdit: true,
+      canAdd: isPlanningManager,
+      canDelete: isPlanningManager,
+      canReorder: isPlanningManager
     })
+  })
+
+  // ─── Pillar Options Helper ───
+
+  function loadPillarOptions() {
+    var pillarConfig = readFromStorage('releases/pm-hub/pillar-config.json')
+    if (pillarConfig && Array.isArray(pillarConfig.pillars)) {
+      return pillarConfig.pillars.map(function(p) { return p.name }).filter(Boolean)
+    }
+    return []
+  }
+
+  /**
+   * @openapi
+   * /api/modules/releases/planning/pillar-options:
+   *   get:
+   *     tags: [releases-planning]
+   *     summary: Get allowed pillar values for Big Rock editing
+   *     description: >
+   *       Derives pillar names from the PM Hub pillar configuration.
+   *       Returns an empty array if no pillar config exists.
+   *     security: [{ bearerAuth: [] }]
+   *     responses:
+   *       200:
+   *         description: Array of pillar name strings
+   */
+  router.get('/pillar-options', requireAuth, requireScope('releases:read'), function(req, res) {
+    res.json({ options: loadPillarOptions() })
   })
 
   /**
@@ -539,7 +636,7 @@ module.exports = function registerPlanningRoutes(router, context) {
    *       200:
    *         description: Reordered Big Rocks
    */
-  router.put('/releases/:version/big-rocks/reorder', requireAuth, requireScope('releases:write'), async function(req, res) {
+  router.put('/releases/:version/big-rocks/reorder', requireAuth, requirePlanningManager, requireScope('releases:write'), async function(req, res) {
     const version = req.params.version
     if (!isValidVersion(version)) {
       return res.status(400).json({ error: 'Invalid version format' })
@@ -616,9 +713,11 @@ module.exports = function registerPlanningRoutes(router, context) {
           existingRockSnapshot = JSON.parse(JSON.stringify(existingRockSnapshot))
         }
 
+        var pillarOpts = loadPillarOptions()
         const validation = validateBigRock(req.body, {
           existingNames: existingNames,
-          originalName: name
+          originalName: name,
+          pillarOptions: pillarOpts
         })
         if (!validation.valid) {
           throw Object.assign(new Error('Validation failed'), { statusCode: 400, fields: validation.errors })
@@ -627,12 +726,15 @@ module.exports = function registerPlanningRoutes(router, context) {
         return saveBigRock(readFromStorage, writeToStorage, version, name, req.body)
       })
 
+      var isRename = req.body.name && req.body.name.trim() !== name
       logAudit(readFromStorage, writeToStorage, {
         version: version,
         action: 'update_rock',
         user: req.auditActor || req.userEmail,
-        summary: 'Updated Big Rock "' + name + '"',
-        details: { rockName: name, changes: computeFieldDiff(existingRockSnapshot, req.body) }
+        summary: isRename
+          ? 'Renamed Big Rock "' + name + '" to "' + req.body.name.trim() + '"'
+          : 'Updated Big Rock "' + name + '"',
+        details: { rockName: name, newName: isRename ? req.body.name.trim() : undefined, changes: computeFieldDiff(existingRockSnapshot, req.body) }
       })
       invalidateCache(version)
       res.json(result)
@@ -660,7 +762,7 @@ module.exports = function registerPlanningRoutes(router, context) {
    *       201:
    *         description: Created Big Rock
    */
-  router.post('/releases/:version/big-rocks', requireAuth, requireScope('releases:write'), async function(req, res) {
+  router.post('/releases/:version/big-rocks', requireAuth, requirePlanningManager, requireScope('releases:write'), async function(req, res) {
     const version = req.params.version
     if (!isValidVersion(version)) {
       return res.status(400).json({ error: 'Invalid version format' })
@@ -675,8 +777,10 @@ module.exports = function registerPlanningRoutes(router, context) {
         const existingRocks = loadBigRocks(readFromStorage, version)
         const existingNames = existingRocks.map(function(r) { return r.name })
 
+        var pillarOpts = loadPillarOptions()
         const validation = validateBigRock(req.body, {
-          existingNames: existingNames
+          existingNames: existingNames,
+          pillarOptions: pillarOpts
         })
         if (!validation.valid) {
           throw Object.assign(new Error('Validation failed'), { statusCode: 400, fields: validation.errors })
@@ -735,7 +839,7 @@ module.exports = function registerPlanningRoutes(router, context) {
    *       200:
    *         description: Deleted Big Rock
    */
-  router.delete('/releases/:version/big-rocks/:name', requireAuth, blockDuringImpersonation, requireScope('releases:write'), async function(req, res) {
+  router.delete('/releases/:version/big-rocks/:name', requireAuth, requirePlanningManager, blockDuringImpersonation, requireScope('releases:write'), async function(req, res) {
     const version = req.params.version
     if (!isValidVersion(version)) {
       return res.status(400).json({ error: 'Invalid version format' })
@@ -1029,6 +1133,10 @@ module.exports = function registerPlanningRoutes(router, context) {
     }
     if (mode !== 'replace' && mode !== 'append') {
       return res.status(400).json({ error: 'mode must be "replace" or "append"' })
+    }
+    // Gate replace mode to planning-manager (structural operation)
+    if (mode === 'replace' && !req.isAdmin && !req.isPlanningManager) {
+      return res.status(403).json({ error: 'Replace mode requires planning-manager role' })
     }
 
     try {

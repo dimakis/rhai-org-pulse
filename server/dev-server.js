@@ -12,6 +12,7 @@
  */
 
 const express = require('express');
+const compression = require('compression');
 const errorBuffer = require('./error-buffer');
 const requestTracker = require('./request-tracker');
 
@@ -173,6 +174,7 @@ apiTokens.init(storageModule, { scopeRegistry });
 const PORT = process.env.API_PORT || 3001;
 
 const app = express();
+app.use(compression());
 app.use(express.json({ limit: '10mb' }));
 
 // Enable CORS
@@ -233,7 +235,7 @@ const roleStore = createRoleStore(readFromStorage, writeToStorage, {
   },
   roleRegistry
 });
-const { authMiddleware, requireAdmin, requireTeamAdmin, requireRole, requireScope, seedRoles } = createAuthMiddleware(readFromStorage, writeToStorage, {
+const { authMiddleware, requireAuth, requireAdmin, requireTeamAdmin, requireRole, requireScope, seedRoles } = createAuthMiddleware(readFromStorage, writeToStorage, {
   tokenValidator: apiTokens,
   roleStore
 });
@@ -1673,6 +1675,78 @@ const effectiveState = getEffectiveState(builtInModules, startupState);
 reconcileStartupState(builtInModules, effectiveState, storageModule);
 const enabledSlugs = new Set(Object.entries(effectiveState).filter(([, v]) => v).map(([k]) => k));
 
+// ─── One-time migration: AI Impact features → unified releases store ───
+// Runs BEFORE module routers to prevent race conditions.
+// Idempotent — safe to re-run if flag file is missing after PVC restore.
+(function migrateAiFeaturesToUnifiedStore() {
+  const FLAG_KEY = 'migrations/ai-features-unified';
+  if (storageModule.readFromStorage(FLAG_KEY)) return;
+
+  const legacyData = storageModule.readFromStorage('ai-impact/features.json');
+  if (!legacyData || !legacyData.features || Object.keys(legacyData.features).length === 0) {
+    // No legacy data to migrate — set flag and return
+    storageModule.writeToStorage(FLAG_KEY, { migratedAt: new Date().toISOString(), count: 0 });
+    return;
+  }
+
+  console.log('[migration] Migrating AI Impact features to unified releases store...');
+  const keys = Object.keys(legacyData.features);
+  let migrated = 0;
+
+  for (const key of keys) {
+    const entry = legacyData.features[key];
+    if (!entry || !entry.latest) continue;
+
+    const featurePath = 'releases/execution/features/' + key + '.json';
+    const existing = storageModule.readFromStorage(featurePath);
+
+    if (existing && existing.aiReview) {
+      // Already has aiReview — skip
+      continue;
+    }
+
+    const aiReview = {
+      ...entry.latest,
+      history: entry.history || []
+    };
+    // Remove fields that belong at the feature level, not aiReview
+    delete aiReview.key;
+
+    if (existing) {
+      // Merge aiReview into existing feature file
+      existing.aiReview = aiReview;
+      storageModule.writeToStorage(featurePath, existing);
+    } else {
+      // Create minimal stub — jira-enrichment will populate Jira fields later
+      storageModule.writeToStorage(featurePath, {
+        key,
+        summary: entry.latest.title || '',
+        aiReview,
+        _sources: { aiReview: new Date().toISOString() }
+      });
+    }
+    migrated++;
+  }
+
+  // Rebuild index after migration
+  // rebuildIndex is synchronous (reads feature files + writes index.json) — safe to call without await
+  if (migrated > 0) {
+    try {
+      const { rebuildIndex } = require('../modules/releases/server/execution/feature-store');
+      rebuildIndex(storageModule);
+      console.log(`[migration] Migrated ${migrated} AI Impact features, index rebuilt.`);
+    } catch (err) {
+      console.log(`[migration] Migrated ${migrated} AI Impact features (index rebuild deferred to next refresh): ${err.message}`);
+    }
+  }
+
+  storageModule.writeToStorage(FLAG_KEY, {
+    migratedAt: new Date().toISOString(),
+    count: migrated,
+    totalLegacy: keys.length
+  });
+})();
+
 const moduleRouters = createModuleRouters(builtInModules, coreServices, enabledSlugs, registries);
 
 const ttRouter = moduleRouters['team-tracker'];
@@ -2116,7 +2190,7 @@ function exportRateLimit(req, res, next) {
  *       500:
  *         $ref: '#/components/responses/ServerError'
  */
-app.get('/api/export/test-data', requireAdmin, requireScope('admin:manage'), exportRateLimit, function(req, res) {
+app.get('/api/export/test-data', requireAuth, exportRateLimit, function(req, res) {
   handleExport(req, res, storageModule, exportRegistry);
 });
 

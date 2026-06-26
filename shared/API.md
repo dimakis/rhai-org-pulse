@@ -66,7 +66,7 @@ Core team owns `shared/` via CODEOWNERS. Changes require core team review.
 |--------|-------------|
 | `storage` | `{ readFromStorage, writeToStorage, writeToStorageAtomic, listStorageFiles, deleteStorageDirectory, deleteFromStorage, getFileMtime }` — filesystem-backed JSON storage. `getFileMtime(key)` returns file mtime in ms without reading (for cache invalidation). |
 | `demoStorage` | `{ readFromStorage, writeToStorage, writeToStorageAtomic, listStorageFiles, deleteStorageDirectory, deleteFromStorage, getFileMtime }` — fixture-backed read-only storage for demo mode |
-| `createAuthMiddleware(readFromStorage, writeToStorage, options)` | Factory returning `{ authMiddleware, requireAdmin, requireTeamAdmin, requireRole, requireScope, isAdmin, seedRoles }`. `requireRole(roleName)` returns Express middleware requiring a specific role (admins always pass). `requireScope(scopeName)` returns Express middleware that enforces the given scope for token-authenticated requests (browser/proxy auth is unrestricted). Options: `{ tokenValidator, roleStore }` |
+| `createAuthMiddleware(readFromStorage, writeToStorage, options)` | Factory returning `{ authMiddleware, requireAuth, requireAdmin, requireTeamAdmin, requireRole, requireScope, isAdmin, seedRoles }`. `requireAuth` returns 401 if no user is authenticated. `requireRole(roleName)` returns Express middleware requiring a specific role (admins always pass). `requireScope(scopeName)` returns Express middleware that enforces the given scope for token-authenticated requests (browser/proxy auth is unrestricted). Options: `{ tokenValidator, roleStore }` |
 | `createRoleStore(readFromStorage, writeToStorage, options?)` | Factory returning role CRUD: `{ getRoles, hasRole, assignRole, revokeRole, listAssignments, getAdminEmails, migrateFromAllowlist, migrateEmailDomains, invalidateCache }`. Options: `{ getAuthDomain, roleRegistry }` — `getAuthDomain`: function returning the auth email domain string (or null), normalizes emails before storage/lookup. `roleRegistry`: role registry instance, when set `assignRole`/`revokeRole` validate against registered roles. |
 | `normalizeEmail(email, authDomain)` | Normalize an email's domain to the given auth domain. Returns the email with its domain replaced, or the original if no authDomain. Exported for testing. |
 | `blockDuringImpersonation` | Express middleware that returns 403 during impersonation. Exported from auth.js. |
@@ -96,6 +96,12 @@ For example, the `health-metrics` module reads `team-data/registry.json` and `te
 - Use `readFromStorage()` — never construct raw filesystem paths
 - Treat exported data as read-only; do not write to another module's data files
 - If the exporting module changes its data format, coordinate via a shared PR
+
+### Cross-Module Writes via Internal API
+
+When one module needs to **write** data owned by another module, it uses a localhost HTTP call to the owning module's API endpoint. This ensures the owning module's write coordination (mutexes, index rebuilding) is respected.
+
+Example: AI Impact pushes review scores to the releases execution store via `POST /api/modules/releases/execution/ai-review/bulk`. The dependency is declared explicitly in `module.json` (`"requires": ["releases"]`). Internal API calls use `eslint-disable-next-line org-pulse/no-cross-module-imports` with a justification comment.
 
 ## Versioning
 
