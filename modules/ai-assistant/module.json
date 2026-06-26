@@ -13,15 +13,11 @@
     "entry": "./server/index.js"
   },
   "secrets": {
+    "platform": [],
     "module": [
       {
         "key": "OPENCODE_URL",
         "description": "Base URL for the OpenCode agent service",
-        "required": true
-      },
-      {
-        "key": "OPENCODE_PASSWORD",
-        "description": "Password for OpenCode authentication",
         "required": true
       }
     ]

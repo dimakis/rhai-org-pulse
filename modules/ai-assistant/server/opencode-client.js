@@ -1,13 +1,24 @@
 // @opencode-ai/sdk is ESM-only — use dynamic import() from CJS
-let _clientPromise = null
+const _clients = new Map()
+
+const TIMEOUT_MS = 60_000
+
+function withTimeout(promise, ms = TIMEOUT_MS) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('OpenCode request timed out')), ms)
+    )
+  ])
+}
 
 function getClient(baseUrl) {
-  if (!_clientPromise) {
-    _clientPromise = import('@opencode-ai/sdk').then(({ createOpencodeClient }) =>
+  if (!_clients.has(baseUrl)) {
+    _clients.set(baseUrl, import('@opencode-ai/sdk').then(({ createOpencodeClient }) =>
       createOpencodeClient({ baseUrl })
-    )
+    ))
   }
-  return _clientPromise
+  return _clients.get(baseUrl)
 }
 
 /**
@@ -15,7 +26,7 @@ function getClient(baseUrl) {
  */
 async function createSession(baseUrl) {
   const client = await getClient(baseUrl)
-  const result = await client.session.create()
+  const result = await withTimeout(client.session.create())
   return result.data.id
 }
 
@@ -33,12 +44,12 @@ async function sendMessage(baseUrl, sessionId, message) {
   const client = await getClient(baseUrl)
 
   // prompt() is blocking — waits for the full response and returns it inline
-  const result = await client.session.prompt({
+  const result = await withTimeout(client.session.prompt({
     path: { id: sessionId },
     body: {
       parts: [{ type: 'text', text: message }]
     }
-  })
+  }))
 
   // Extract text from response parts
   const parts = result.data?.parts || []
@@ -53,7 +64,7 @@ async function sendMessage(baseUrl, sessionId, message) {
  * Reset the cached client (useful if config changes at runtime).
  */
 function resetClient() {
-  _clientPromise = null
+  _clients.clear()
 }
 
 module.exports = { createSession, sendMessage, resetClient }

@@ -4,8 +4,22 @@ const RATE_LIMIT_MAX = 20
 const RATE_LIMIT_WINDOW_MS = 60_000
 const rateCounts = new Map()
 
+// Maps sessionId → userEmail for ownership validation
+const sessionOwners = new Map()
+
+let _lastCleanup = Date.now()
+
 function isRateLimited(email) {
   const now = Date.now()
+
+  // Periodic cleanup: sweep stale entries every 5 minutes
+  if (now - _lastCleanup > 5 * RATE_LIMIT_WINDOW_MS) {
+    _lastCleanup = now
+    for (const [k, v] of rateCounts) {
+      if (now - v.windowStart >= RATE_LIMIT_WINDOW_MS) rateCounts.delete(k)
+    }
+  }
+
   const entry = rateCounts.get(email)
   if (!entry || now - entry.windowStart >= RATE_LIMIT_WINDOW_MS) {
     rateCounts.set(email, { windowStart: now, count: 1 })
@@ -18,37 +32,48 @@ function isRateLimited(email) {
 function buildSystemPrompt(context) {
   if (!context) return ''
   const parts = ['You are an AI assistant embedded in Org Pulse, an internal org-health dashboard.']
-  if (context.module) parts.push(`The user is currently viewing the "${context.module}" module.`)
-  if (context.view) parts.push(`They are on the "${context.view}" view.`)
-  if (context.params && Object.keys(context.params).length > 0) {
-    parts.push(`Page parameters: ${JSON.stringify(context.params)}`)
+  const safeStr = (s) => typeof s === 'string' ? s.replace(/[^a-zA-Z0-9 _-]/g, '') : ''
+  if (context.module) parts.push(`The user is currently viewing the "${safeStr(context.module)}" module.`)
+  if (context.view) parts.push(`They are on the "${safeStr(context.view)}" view.`)
+  if (context.params && typeof context.params === 'object' && Object.keys(context.params).length > 0) {
+    // Limit params to prevent prompt stuffing
+    const safeParams = {}
+    const keys = Object.keys(context.params).slice(0, 10)
+    for (const k of keys) {
+      const v = context.params[k]
+      if (typeof v === 'string') safeParams[k] = v.slice(0, 200)
+    }
+    parts.push(`Page parameters: ${JSON.stringify(safeParams)}`)
   }
   parts.push('Answer concisely. Use markdown for formatting. If you don\'t know something, say so.')
   return parts.join(' ')
 }
 
 module.exports = function registerRoutes(router, context) {
-  const { requireScope } = context
+  const { requireAuth, requireScope } = context
 
   context.registerScopes([
     { key: 'ai-assistant:use', label: 'Use', description: 'Send messages to the AI assistant', category: 'AI Assistant' }
   ])
 
-  const openCodeUrl = context.resolveSecret('OPENCODE_URL')
-
   if (context.registerDiagnostics) {
     context.registerDiagnostics(async function () {
+      const url = context.resolveSecret('OPENCODE_URL')
       return {
-        configured: !!openCodeUrl,
-        openCodeUrl: openCodeUrl ? openCodeUrl.replace(/\/\/.*@/, '//***@') : null
+        configured: !!url,
+        openCodeUrl: url ? url.replace(/\/\/.*@/, '//***@') : null
       }
     })
   }
 
-  router.post('/chat', requireScope('ai-assistant:use'), async function (req, res) {
+  router.post('/chat', requireAuth, requireScope('ai-assistant:use'), async function (req, res) {
     const baseUrl = context.resolveSecret('OPENCODE_URL')
     if (!baseUrl) {
       return res.status(503).json({ error: 'AI assistant is not configured (OPENCODE_URL missing)' })
+    }
+
+    if (!req.userEmail) {
+      return res.status(401).json({ error: 'Authentication required' })
     }
 
     if (isRateLimited(req.userEmail)) {
@@ -63,11 +88,33 @@ module.exports = function registerRoutes(router, context) {
       return res.status(400).json({ error: 'message too long (max 4000 characters)' })
     }
 
+    // Validate pageContext shape to prevent prompt injection
+    if (pageContext) {
+      if (pageContext.module && typeof pageContext.module !== 'string') {
+        return res.status(400).json({ error: 'context.module must be a string' })
+      }
+      if (pageContext.view && typeof pageContext.view !== 'string') {
+        return res.status(400).json({ error: 'context.view must be a string' })
+      }
+      if (pageContext.params && typeof pageContext.params !== 'object') {
+        return res.status(400).json({ error: 'context.params must be an object' })
+      }
+    }
+
     try {
-      // Create or reuse session
-      let sessionId = existingSessionId
+      // Validate session ownership or create new session
+      let sessionId = null
+      if (existingSessionId) {
+        const owner = sessionOwners.get(existingSessionId)
+        if (owner && owner !== req.userEmail) {
+          return res.status(403).json({ error: 'Session does not belong to this user' })
+        }
+        sessionId = existingSessionId
+      }
+
       if (!sessionId) {
         sessionId = await createSession(baseUrl)
+        sessionOwners.set(sessionId, req.userEmail)
       }
 
       // Prepend page context to the user message

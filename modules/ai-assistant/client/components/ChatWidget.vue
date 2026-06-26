@@ -3,8 +3,9 @@
   <button
     v-if="!isOpen"
     @click="isOpen = true"
-    class="fixed bottom-6 right-6 z-60 w-14 h-14 bg-blue-600 hover:bg-blue-700 text-white rounded-full shadow-lg hover:shadow-xl transition-all duration-200 flex items-center justify-center"
+    class="fixed bottom-6 right-6 z-[60] w-14 h-14 bg-blue-600 hover:bg-blue-700 text-white rounded-full shadow-lg hover:shadow-xl transition-all duration-200 flex items-center justify-center"
     title="Open AI Assistant"
+    aria-label="Open AI Assistant"
   >
     <BotMessageSquare :size="24" />
   </button>
@@ -14,7 +15,7 @@
     <Transition name="chat-drawer">
       <div
         v-if="isOpen"
-        class="fixed inset-0 sm:inset-auto sm:bottom-6 sm:right-6 sm:w-[420px] sm:h-[600px] sm:max-h-[80vh] z-60 flex flex-col bg-white dark:bg-gray-800 sm:rounded-2xl sm:shadow-2xl sm:border sm:border-gray-200 dark:sm:border-gray-700"
+        class="fixed inset-0 sm:inset-auto sm:bottom-6 sm:right-6 sm:w-[420px] sm:h-[600px] sm:max-h-[80vh] z-[60] flex flex-col bg-white dark:bg-gray-800 sm:rounded-2xl sm:shadow-2xl sm:border sm:border-gray-200 dark:sm:border-gray-700"
       >
         <!-- Header -->
         <div class="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 sm:rounded-t-2xl">
@@ -26,17 +27,18 @@
             @click="isOpen = false"
             class="p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg transition-colors"
             title="Close (Esc)"
+            aria-label="Close chat"
           >
             <X :size="18" />
           </button>
         </div>
 
         <!-- Messages -->
-        <div ref="messagesContainer" class="flex-1 overflow-y-auto p-4 space-y-4">
+        <div ref="messagesContainer" class="flex-1 overflow-y-auto p-4 space-y-4" role="log" aria-live="polite" aria-label="Chat messages">
           <div v-if="messages.length === 0" class="flex flex-col items-center justify-center h-full text-center px-4">
             <BotMessageSquare :size="40" class="text-gray-300 dark:text-gray-600 mb-3" />
             <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">Ask me anything about your org data.</p>
-            <div class="flex flex-wrap justify-center gap-2">
+            <div class="flex flex-wrap justify-center gap-2" role="group" aria-label="Suggested questions">
               <button
                 v-for="chip in suggestions"
                 :key="chip"
@@ -68,6 +70,7 @@
               placeholder="Ask a question..."
               rows="1"
               :disabled="isStreaming"
+              aria-label="Type your message"
               class="flex-1 resize-none rounded-xl border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50 max-h-32 overflow-y-auto"
               @input="autoResize"
             />
@@ -92,6 +95,7 @@ import ChatMessage from './ChatMessage.vue'
 
 const STORAGE_KEY = 'ai-assistant-conversation'
 const SESSION_KEY = 'ai-assistant-session-id'
+const MAX_PERSISTED_MESSAGES = 100
 
 const isOpen = ref(false)
 const inputText = ref('')
@@ -118,17 +122,16 @@ onMounted(() => {
   } catch { /* ignore corrupt data */ }
 })
 
-// Persist on change
+// Persist on change + scroll to bottom
 watch(messages, (val) => {
+  // Persist (cap at last MAX_PERSISTED_MESSAGES messages)
   try {
-    // Strip streaming flag before saving
     const clean = val.map(m => ({ role: m.role, content: m.content }))
-    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(clean))
+    const capped = clean.slice(-MAX_PERSISTED_MESSAGES)
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(capped))
   } catch { /* quota exceeded — ignore */ }
-}, { deep: true })
 
-// Scroll to bottom on new messages
-watch(messages, () => {
+  // Scroll to bottom
   nextTick(() => {
     if (messagesContainer.value) {
       messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight
@@ -155,15 +158,12 @@ onUnmounted(() => document.removeEventListener('keydown', onKeyDown))
 function getPageContext() {
   const hash = window.location.hash || '#/'
   const raw = hash.slice(2)
-  const [pathPart] = raw.split('?')
+  const [pathPart, queryPart] = raw.split('?')
   const parts = pathPart.split('/').filter(Boolean)
   const params = {}
-  const queryPart = raw.split('?')[1]
   if (queryPart) {
-    for (const pair of queryPart.split('&')) {
-      const [k, v] = pair.split('=').map(decodeURIComponent)
-      if (k) params[k] = v || ''
-    }
+    const sp = new URLSearchParams(queryPart)
+    for (const [k, v] of sp) params[k] = v
   }
   return {
     module: parts[0] || 'home',
@@ -187,6 +187,8 @@ async function handleSubmit() {
   const text = inputText.value.trim()
   if (!text || isStreaming.value) return
 
+  isStreaming.value = true
+
   inputText.value = ''
   // Reset textarea height
   if (inputEl.value) inputEl.value.style.height = 'auto'
@@ -194,8 +196,6 @@ async function handleSubmit() {
   messages.value.push({ role: 'user', content: text })
   messages.value.push({ role: 'assistant', content: '', streaming: true })
   const assistantIdx = messages.value.length - 1
-
-  isStreaming.value = true
 
   try {
     const response = await fetch('/api/modules/ai-assistant/chat', {
